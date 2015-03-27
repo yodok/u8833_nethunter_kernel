@@ -323,10 +323,10 @@ static int export_encode_fh(struct dentry *dentry, struct fid *fid,
 
 	if (connectable && (len < 4)) {
 		*max_len = 4;
-		return FILEID_INVALID;
+		return 255;
 	} else if (len < 2) {
 		*max_len = 2;
-		return FILEID_INVALID;
+		return 255;
 	}
 
 	len = 2;

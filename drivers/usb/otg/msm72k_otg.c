@@ -638,11 +638,6 @@ static void msm_otg_start_host(struct usb_otg *otg, int on)
 				clk_disable_unprepare(dev->iface_clk);
 		}
 
-		if (on)
-			otg_pm_qos_update_latency(dev, 1);
-		else
-			otg_pm_qos_update_latency(dev, 0);
-
 		dev->start_host(otg->host, on);
 
 		if (!on && pdata->setup_gpio)
@@ -2470,7 +2465,6 @@ static ssize_t otg_mode_write(struct file *file, const char __user *buf,
 		set_bit(ID, &dev->inputs);
 		work = 1;
 	} else if (!memcmp(buf, "peripheral", 10)) {
-		dev->pdata->otg_mode = OTG_ID;
 		set_bit(B_SESS_VLD, &dev->inputs);
 		set_bit(ID, &dev->inputs);
 		work = 1;

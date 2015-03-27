@@ -71,8 +71,7 @@ static struct kmem_cache *bio_find_or_create_slab(unsigned int extra_size)
 {
 	unsigned int sz = sizeof(struct bio) + extra_size;
 	struct kmem_cache *slab = NULL;
-	struct bio_slab *bslab, *new_bio_slabs;
-	unsigned int new_bio_slab_max;
+	struct bio_slab *bslab;
 	unsigned int i, entry = -1;
 
 	mutex_lock(&bio_slab_lock);
@@ -95,14 +94,12 @@ static struct kmem_cache *bio_find_or_create_slab(unsigned int extra_size)
 		goto out_unlock;
 
 	if (bio_slab_nr == bio_slab_max && entry == -1) {
-		new_bio_slab_max = bio_slab_max << 1;
-		new_bio_slabs = krealloc(bio_slabs,
-					 new_bio_slab_max * sizeof(struct bio_slab),
-					 GFP_KERNEL);
-		if (!new_bio_slabs)
+		bio_slab_max <<= 1;
+		bio_slabs = krealloc(bio_slabs,
+				     bio_slab_max * sizeof(struct bio_slab),
+				     GFP_KERNEL);
+		if (!bio_slabs)
 			goto out_unlock;
-		bio_slab_max = new_bio_slab_max;
-		bio_slabs = new_bio_slabs;
 	}
 	if (entry == -1)
 		entry = bio_slab_nr++;
@@ -521,7 +518,7 @@ EXPORT_SYMBOL(bio_get_nr_vecs);
 
 static int __bio_add_page(struct request_queue *q, struct bio *bio, struct page
 			  *page, unsigned int len, unsigned int offset,
-			  unsigned int max_sectors)
+			  unsigned short max_sectors)
 {
 	int retried_segments = 0;
 	struct bio_vec *bvec;
@@ -790,22 +787,12 @@ static int __bio_copy_iov(struct bio *bio, struct bio_vec *iovecs,
 int bio_uncopy_user(struct bio *bio)
 {
 	struct bio_map_data *bmd = bio->bi_private;
-	struct bio_vec *bvec;
-	int ret = 0, i;
+	int ret = 0;
 
-	if (!bio_flagged(bio, BIO_NULL_MAPPED)) {
-		/*
-		 * if we're in a workqueue, the request is orphaned, so
-		 * don't copy into a random user address space, just free.
-		 */
-		if (current->mm)
-			ret = __bio_copy_iov(bio, bmd->iovecs, bmd->sgvecs,
-					     bmd->nr_sgvecs, bio_data_dir(bio) == READ,
-					     0, bmd->is_our_pages);
-		else if (bmd->is_our_pages)
-			__bio_for_each_segment(bvec, bio, i, 0)
-				__free_page(bvec->bv_page);
-	}
+	if (!bio_flagged(bio, BIO_NULL_MAPPED))
+		ret = __bio_copy_iov(bio, bmd->iovecs, bmd->sgvecs,
+				     bmd->nr_sgvecs, bio_data_dir(bio) == READ,
+				     0, bmd->is_our_pages);
 	bio_free_map_data(bmd);
 	bio_put(bio);
 	return ret;

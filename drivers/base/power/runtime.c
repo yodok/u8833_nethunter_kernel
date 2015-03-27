@@ -13,42 +13,6 @@
 #include <trace/events/rpm.h>
 #include "power.h"
 
-#define RPM_GET_CALLBACK(dev, cb)				\
-({								\
-	int (*__rpm_cb)(struct device *__d);			\
-								\
-	if (dev->pm_domain)					\
-		__rpm_cb = dev->pm_domain->ops.cb;		\
-	else if (dev->type && dev->type->pm)			\
-		__rpm_cb = dev->type->pm->cb;			\
-	else if (dev->class && dev->class->pm)			\
-		__rpm_cb = dev->class->pm->cb;			\
-	else if (dev->bus && dev->bus->pm)			\
-		__rpm_cb = dev->bus->pm->cb;			\
-	else							\
-		__rpm_cb = NULL;				\
-								\
-	if (!__rpm_cb && dev->driver && dev->driver->pm)	\
-		__rpm_cb = dev->driver->pm->cb;			\
-								\
-	__rpm_cb;						\
-})
-
-static int (*rpm_get_suspend_cb(struct device *dev))(struct device *)
-{
-	return RPM_GET_CALLBACK(dev, runtime_suspend);
-}
-
-static int (*rpm_get_resume_cb(struct device *dev))(struct device *)
-{
-	return RPM_GET_CALLBACK(dev, runtime_resume);
-}
-
-static int (*rpm_get_idle_cb(struct device *dev))(struct device *)
-{
-	return RPM_GET_CALLBACK(dev, runtime_idle);
-}
-
 static int rpm_resume(struct device *dev, int rpmflags);
 static int rpm_suspend(struct device *dev, int rpmflags);
 
@@ -275,7 +239,19 @@ static int rpm_idle(struct device *dev, int rpmflags)
 
 	dev->power.idle_notification = true;
 
-	callback = rpm_get_idle_cb(dev);
+	if (dev->pm_domain)
+		callback = dev->pm_domain->ops.runtime_idle;
+	else if (dev->type && dev->type->pm)
+		callback = dev->type->pm->runtime_idle;
+	else if (dev->class && dev->class->pm)
+		callback = dev->class->pm->runtime_idle;
+	else if (dev->bus && dev->bus->pm)
+		callback = dev->bus->pm->runtime_idle;
+	else
+		callback = NULL;
+
+	if (!callback && dev->driver && dev->driver->pm)
+		callback = dev->driver->pm->runtime_idle;
 
 	if (callback)
 		__rpm_callback(callback, dev);
@@ -454,6 +430,7 @@ static int rpm_suspend(struct device *dev, int rpmflags)
 		goto repeat;
 	}
 
+	dev->power.deferred_resume = false;
 	if (dev->power.no_callbacks)
 		goto no_callback;	/* Assume success. */
 
@@ -500,7 +477,19 @@ static int rpm_suspend(struct device *dev, int rpmflags)
 	dev->power.suspend_time = qos.time_now;
 	dev->power.max_time_suspended_ns = qos.constraint_ns ? : -1;
 
-	callback = rpm_get_suspend_cb(dev);
+	if (dev->pm_domain)
+		callback = dev->pm_domain->ops.runtime_suspend;
+	else if (dev->type && dev->type->pm)
+		callback = dev->type->pm->runtime_suspend;
+	else if (dev->class && dev->class->pm)
+		callback = dev->class->pm->runtime_suspend;
+	else if (dev->bus && dev->bus->pm)
+		callback = dev->bus->pm->runtime_suspend;
+	else
+		callback = NULL;
+
+	if (!callback && dev->driver && dev->driver->pm)
+		callback = dev->driver->pm->runtime_suspend;
 
 	retval = rpm_callback(callback, dev);
 	if (retval)
@@ -517,7 +506,6 @@ static int rpm_suspend(struct device *dev, int rpmflags)
 	wake_up_all(&dev->power.wait_queue);
 
 	if (dev->power.deferred_resume) {
-		dev->power.deferred_resume = false;
 		rpm_resume(dev, 0);
 		retval = -EAGAIN;
 		goto out;
@@ -593,9 +581,6 @@ static int rpm_resume(struct device *dev, int rpmflags)
  repeat:
 	if (dev->power.runtime_error)
 		retval = -EINVAL;
-	else if (dev->power.disable_depth == 1 && dev->power.is_suspended
-	    && dev->power.runtime_status == RPM_ACTIVE)
-		retval = 1;
 	else if (dev->power.disable_depth > 0)
 		retval = -EACCES;
 	if (retval)
@@ -667,7 +652,6 @@ static int rpm_resume(struct device *dev, int rpmflags)
 		    || dev->parent->power.runtime_status == RPM_ACTIVE) {
 			atomic_inc(&dev->parent->power.child_count);
 			spin_unlock(&dev->parent->power.lock);
-			retval = 1;
 			goto no_callback;	/* Assume success. */
 		}
 		spin_unlock(&dev->parent->power.lock);
@@ -725,7 +709,19 @@ static int rpm_resume(struct device *dev, int rpmflags)
 
 	__update_runtime_status(dev, RPM_RESUMING);
 
-	callback = rpm_get_resume_cb(dev);
+	if (dev->pm_domain)
+		callback = dev->pm_domain->ops.runtime_resume;
+	else if (dev->type && dev->type->pm)
+		callback = dev->type->pm->runtime_resume;
+	else if (dev->class && dev->class->pm)
+		callback = dev->class->pm->runtime_resume;
+	else if (dev->bus && dev->bus->pm)
+		callback = dev->bus->pm->runtime_resume;
+	else
+		callback = NULL;
+
+	if (!callback && dev->driver && dev->driver->pm)
+		callback = dev->driver->pm->runtime_resume;
 
 	retval = rpm_callback(callback, dev);
 	if (retval) {
@@ -739,7 +735,7 @@ static int rpm_resume(struct device *dev, int rpmflags)
 	}
 	wake_up_all(&dev->power.wait_queue);
 
-	if (retval >= 0)
+	if (!retval)
 		rpm_idle(dev, RPM_ASYNC);
 
  out:
@@ -1391,7 +1387,7 @@ void pm_runtime_remove(struct device *dev)
 	if (dev->power.runtime_status == RPM_ACTIVE)
 		pm_runtime_set_suspended(dev);
 	if (dev->power.irq_safe && dev->parent)
-		pm_runtime_put(dev->parent);
+		pm_runtime_put_sync(dev->parent);
 }
 
 /**

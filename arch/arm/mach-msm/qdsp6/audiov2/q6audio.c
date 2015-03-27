@@ -23,6 +23,7 @@
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/wakelock.h>
+#include <linux/android_pmem.h>
 #include <linux/gpio.h>
 #include <linux/pm_qos.h>
 

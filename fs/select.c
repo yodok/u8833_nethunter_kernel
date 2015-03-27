@@ -26,7 +26,6 @@
 #include <linux/fs.h>
 #include <linux/rcupdate.h>
 #include <linux/hrtimer.h>
-#include <linux/freezer.h>
 
 #include <asm/uaccess.h>
 
@@ -70,6 +69,7 @@ static long __estimate_accuracy(struct timespec *tv)
 
 long select_estimate_accuracy(struct timespec *tv)
 {
+	unsigned long ret;
 	struct timespec now;
 
 	/*
@@ -81,8 +81,10 @@ long select_estimate_accuracy(struct timespec *tv)
 
 	ktime_get_ts(&now);
 	now = timespec_sub(*tv, now);
-	return min_t(long, __estimate_accuracy(&now),
-			task_get_effective_timer_slack(current));
+	ret = __estimate_accuracy(&now);
+	if (ret < current->timer_slack_ns)
+		return current->timer_slack_ns;
+	return ret;
 }
 
 
@@ -234,8 +236,7 @@ int poll_schedule_timeout(struct poll_wqueues *pwq, int state,
 
 	set_current_state(state);
 	if (!pwq->triggered)
-		rc = freezable_schedule_hrtimeout_range(expires, slack,
-							HRTIMER_MODE_ABS);
+		rc = schedule_hrtimeout_range(expires, slack, HRTIMER_MODE_ABS);
 	__set_current_state(TASK_RUNNING);
 
 	/*
@@ -344,8 +345,8 @@ static int max_select_fd(unsigned long n, fd_set_bits *fds)
 	struct fdtable *fdt;
 
 	/* handle last in-complete long-word first */
-	set = ~(~0UL << (n & (BITS_PER_LONG-1)));
-	n /= BITS_PER_LONG;
+	set = ~(~0UL << (n & (__NFDBITS-1)));
+	n /= __NFDBITS;
 	fdt = files_fdtable(current->files);
 	open_fds = fdt->open_fds + n;
 	max = 0;
@@ -372,7 +373,7 @@ get_max:
 			max++;
 			set >>= 1;
 		} while (set);
-		max += n * BITS_PER_LONG;
+		max += n * __NFDBITS;
 	}
 
 	return max;
@@ -434,11 +435,11 @@ int do_select(int n, fd_set_bits *fds, struct timespec *end_time)
 			in = *inp++; out = *outp++; ex = *exp++;
 			all_bits = in | out | ex;
 			if (all_bits == 0) {
-				i += BITS_PER_LONG;
+				i += __NFDBITS;
 				continue;
 			}
 
-			for (j = 0; j < BITS_PER_LONG; ++j, ++i, bit <<= 1) {
+			for (j = 0; j < __NFDBITS; ++j, ++i, bit <<= 1) {
 				int fput_needed;
 				if (i >= n)
 					break;

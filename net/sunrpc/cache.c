@@ -1201,6 +1201,7 @@ EXPORT_SYMBOL_GPL(sunrpc_cache_pipe_upcall);
  * key and content are both parsed by cache
  */
 
+#define isodigit(c) (isdigit(c) && c <= '7')
 int qword_get(char **bpp, char *dest, int bufsize)
 {
 	/* return bytes copied, or -1 on error */
@@ -1405,11 +1406,11 @@ static ssize_t read_flush(struct file *file, char __user *buf,
 			  size_t count, loff_t *ppos,
 			  struct cache_detail *cd)
 {
-	char tbuf[22];
+	char tbuf[20];
 	unsigned long p = *ppos;
 	size_t len;
 
-	snprintf(tbuf, sizeof(tbuf), "%lu\n", convert_to_wallclock(cd->flush_time));
+	sprintf(tbuf, "%lu\n", convert_to_wallclock(cd->flush_time));
 	len = strlen(tbuf);
 	if (p >= len)
 		return 0;

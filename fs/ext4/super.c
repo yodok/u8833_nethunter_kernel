@@ -39,6 +39,11 @@
 #include <linux/log2.h>
 #include <linux/crc16.h>
 #include <linux/cleancache.h>
+#ifdef CONFIG_EXT4_HUAWEI_DEBUG
+#include <linux/fcntl.h>
+#include <linux/syscalls.h>
+#include <asm/unistd.h>
+#endif
 #include <asm/uaccess.h>
 
 #include <linux/kthread.h>
@@ -437,13 +442,10 @@ static void ext4_journal_commit_callback(journal_t *journal, transaction_t *txn)
 	struct super_block		*sb = journal->j_private;
 	struct ext4_sb_info		*sbi = EXT4_SB(sb);
 	int				error = is_journal_aborted(journal);
-	struct ext4_journal_cb_entry	*jce;
+	struct ext4_journal_cb_entry	*jce, *tmp;
 
-	BUG_ON(txn->t_state == T_FINISHED);
 	spin_lock(&sbi->s_md_lock);
-	while (!list_empty(&txn->t_private_list)) {
-		jce = list_entry(txn->t_private_list.next,
-				 struct ext4_journal_cb_entry, jce_list);
+	list_for_each_entry_safe(jce, tmp, &txn->t_private_list, jce_list) {
 		list_del_init(&jce->jce_list);
 		spin_unlock(&sbi->s_md_lock);
 		jce->jce_func(sb, jce, error);
@@ -467,10 +469,379 @@ static void ext4_journal_commit_callback(journal_t *journal, transaction_t *txn)
  * that error until we've noted it down and cleared it.
  */
 
+#ifdef CONFIG_EXT4_HUAWEI_DEBUG
+
+#define KMSG_BUF_LEN	         (1 << CONFIG_LOG_BUF_SHIFT)     /* The kernel log buffer length */
+#define MOUNT_FILE               "/proc/mounts"                  /* The mounted file path, it perhaps be /proc/fstab or /proc/mtab or others */
+#define LINE_MAX                 1024                            /* The max length of line_buf to save one line in the mounted file */
+#define CONTENT_MAX              512                             /* The max length of each field in one line */
+#define LOG_PATH                 "/ext4_error_log"               /* We want to save the log file in this directory */
+
+/* When parse one line in the mounted file, the first field is block name,
+   the second field is mounted directory, we need this struct to save this two field
+*/
+struct _MNT_CONTENT
+{
+    char mnt_name[CONTENT_MAX];
+    char mnt_dir[CONTENT_MAX];
+};
+
+static struct _MNT_CONTENT mnt_content;          /* This is used to save forefront two fields of one line */
+static char line_buf[LINE_MAX] = {0};            /* This is used to save one line in the mounted file */
+extern const char *kmsg_buf;                     /* The kernel log buf start address */
+static unsigned char ext4_kmsg_flag = 0;         /* This is a mutex flag */
+unsigned char do_not_check_permission_flag = 0;       /* check the permission flag */
+
+/* The following function is used to get a new line from specified file */
+static char * fget_line(char * buf, int max_num, int fd, off_t *fd_seek)
+{
+	int cur_seek = *fd_seek;
+	char c_buf[1];
+	int i = 0;
+
+	for(i=0; i<max_num; i++)
+	{
+		buf[i]='\0';
+	}
+	
+	sys_lseek(fd, (off_t)cur_seek, 0);
+	
+	for(i=0;i<max_num;i++)
+	{
+        if ((unsigned)sys_read(fd, (char *)c_buf, 1) != 1)
+        {
+			printk(KERN_WARNING "%s: Can not read %d    \n",
+				__func__, __LINE__);
+			return NULL;
+		}
+		else
+		{
+			buf[i]=c_buf[0];
+			cur_seek++;
+			sys_lseek(fd, (off_t)cur_seek,0);
+		}
+		
+		if(buf[i]=='\n')
+		{
+            buf[i] = 0;
+			break;
+		}
+	}
+    
+	*fd_seek=cur_seek;
+    
+	return buf;
+}
+
+/* The following function is used to parse one line and get the mounted information */
+static void parse_line(char *line_buffer, struct _MNT_CONTENT *mount_content)
+{
+    int i = 0;
+    int j = 0;
+    int space_flag = 0;
+    for (i=0; i<CONTENT_MAX; i++)
+    {
+        if (line_buffer[i] != ' ')
+        {
+            if (space_flag == 0)
+            {
+                mount_content->mnt_name[i] = line_buffer[i];
+            }
+            else if (space_flag == 1)
+            {
+                mount_content->mnt_dir[j] = line_buffer[i];
+                j++;
+            }
+            else
+            {
+                break;
+            }
+            
+            if (line_buffer[i+1] == ' ')
+            {
+                space_flag++;
+            }
+        }
+        else
+        {
+            continue;
+        }
+    }
+    
+    return;
+}
+
+/* The following function is used to convert the integer to a string */
+static char *decimal_itoa(int num, char *str)
+{
+    char index[] = "0123456789";
+    int i = 0;
+    int j = 0;
+    int radix = 10;
+    
+    do
+    {
+        str[i++]=index[num%radix];
+        num /= radix;
+    } while (num);
+    
+    str[i]='\0';
+    
+    for(j=0; j<(i/2); j++)
+    {
+        str[j] = str[j] + str[i-j-1];
+        str[i-j-1] = str[j] - str[i-j-1];
+        str[j] = str[j] - str[i-j-1];
+    }
+    
+    return str;
+}
+
+/* The following function is used to save kernel log when ext4 file system happens a error */
+void ext4_handle_kmsg(void)
+{
+    int fdKmsg = -1;
+    int fdMounts = -1;
+    int fdInfo = -1;
+    int tmpIndex = 0;
+    int tmpFlag = 0;
+    int mountFlag = 0;
+    off_t fd_seek=0;
+    char tmpbuf[10] = {0};
+    unsigned char file_index = 0;
+    mm_segment_t old_fs;
+    
+    /* The internal SD card block name, both are same */
+    char inter_sd_blk_name1[] = "/dev/block/mmcblk0p19";
+    char inter_sd_blk_name2[] = "/dev/block/vold/179:19";
+    char inter_sd_dir1[] = "/mnt/sdcard";
+    char inter_sd_dir2[] = "/mnt/sdcard2";
+    
+    /* we want to check permission normally */
+    do_not_check_permission_flag = 0;
+    
+    printk("\next4_kmsg_flag is equal to : %d\n", ext4_kmsg_flag);
+    
+    /* ext4_kmsg_flag is a mutex flag, we don't want this function will be called by more than one process */
+    if (0 == ext4_kmsg_flag)
+    {
+        ext4_kmsg_flag = 1;
+        
+        /* Save the old space */
+        old_fs = get_fs();
+        /* Switch to kernel space */
+        set_fs(KERNEL_DS);
+
+        /* open mounted file, this file perhaps is  "/proc/mounts", or "/proc/fstab", or "/proc/mtab",
+           but here we only use "/proc/mounts"
+        */
+        fdMounts = sys_open(MOUNT_FILE, O_RDONLY, 0);
+        
+        printk("\nfdMounts is equal to : %d\n", fdMounts);
+        
+        if (fdMounts < 0)
+        {
+            printk("\nOpen %s failed\n", MOUNT_FILE);
+            ext4_kmsg_flag = 0;
+            
+            /* Restore the old space */
+            set_fs(old_fs);
+            return;
+        }
+    
+        /* loop read one line of the mounted file to parse */
+        while(NULL != (fget_line(line_buf, LINE_MAX, fdMounts, &fd_seek)))
+        {
+            memset(&mnt_content, 0, sizeof(mnt_content));
+            
+            /* parse the specified one line */
+            parse_line(line_buf, &mnt_content);
+        
+            /* if we find the internal sd card, then break */
+            if ((memcmp(mnt_content.mnt_name, inter_sd_blk_name1, sizeof(inter_sd_blk_name1)) == 0) || (memcmp(mnt_content.mnt_name, inter_sd_blk_name2, sizeof(inter_sd_blk_name2)) == 0))
+            {
+                tmpFlag = 1;
+                break;
+            }
+        }
+        
+        /* if we don't find the internal sd card, don't exit, just mount manually */
+        if (1 != tmpFlag)
+        {
+            int err = 0;
+            
+            printk("\nInternal SD card is not found, now mount manually\n");
+            
+            /* if ext4 happens errors, wo don't want to check permission when mount internal sd card */
+            do_not_check_permission_flag = 1;
+            
+            /*  now mounting */
+            err = sys_mount(inter_sd_blk_name1, inter_sd_dir1, "vfat", 0, NULL);
+            if (err)
+            {
+                printk("\nInternal SD card mount failed: %d, try again!\n", err);
+                
+                err = sys_mount(inter_sd_blk_name1, inter_sd_dir2, "vfat", 0, NULL);
+                if (err)
+                {
+                    /* restore check permission flag whatever mounting failed or not */
+                    do_not_check_permission_flag = 0;
+                    
+                    printk("\nInternal SD card is not found\n");
+                    ext4_kmsg_flag = 0;
+                    sys_close(fdMounts);
+                    /* Restore the old space */
+                    set_fs(old_fs);
+                    return;
+                }
+                else
+                {
+                    /* restore check permission flag if mounting ok */
+                    do_not_check_permission_flag = 0;
+                    
+                    mountFlag = 2;
+                    printk("\nInternal SD card mount ok2!\n");
+                    memset(&mnt_content, 0, sizeof(mnt_content));
+                    strcpy(mnt_content.mnt_name, inter_sd_blk_name1);
+                    strcpy(mnt_content.mnt_dir, inter_sd_dir2);
+                }
+            }
+	        else
+            {
+                /* restore check permission flag if mounting ok */
+                do_not_check_permission_flag = 0;
+                
+                mountFlag = 1;
+                printk("\nInternal SD card mount ok1!\n");
+                memset(&mnt_content, 0, sizeof(mnt_content));
+                strcpy(mnt_content.mnt_name, inter_sd_blk_name1);
+                strcpy(mnt_content.mnt_dir, inter_sd_dir1);
+            }
+        }
+        
+        printk("\nInternal SD card block name is : %s\n", mnt_content.mnt_name);
+        printk("\nInternal SD card is mounted on : %s\n", mnt_content.mnt_dir);
+    
+        strcat(mnt_content.mnt_dir, LOG_PATH);
+        
+        /* save the current directory */
+        tmpIndex = strlen(mnt_content.mnt_dir);
+    
+        /* we need to create ext4_error_log folder defined by LOG_PATH in the internal sdcard root directory*/
+        sys_mkdir(mnt_content.mnt_dir, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+
+        /* Here read Info.txt which record the corrent file index, if no Info.txt, just create it */
+        strcat(mnt_content.mnt_dir, "/Info.txt");
+        fdInfo = sys_open(mnt_content.mnt_dir, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+        if (fdInfo < 0)
+        {
+            printk("\nCan't open info file\n");
+            ext4_kmsg_flag = 0;
+            sys_close(fdMounts);
+            /* Restore the old space */
+            set_fs(old_fs);
+            return;
+        }
+        else
+        {
+            fd_seek = 0;
+            if (NULL != fget_line(line_buf, LINE_MAX, fdInfo, &fd_seek))
+            {
+                int i = 0;
+                int result = 0;
+                
+                while (line_buf[i])
+                {
+                    result = (result * 10) + (line_buf[i] - '0');
+                    i++;
+                }
+                file_index = result;
+            }
+        }
+        
+        /* restore the current directory */
+        while (mnt_content.mnt_dir[tmpIndex])
+        {
+            mnt_content.mnt_dir[tmpIndex] = 0;
+            tmpIndex++;
+            if (tmpIndex >= sizeof(mnt_content.mnt_dir))
+            {
+                break;
+            }
+        }
+    
+        /* make the log file name */
+        memset(tmpbuf, 0, sizeof(tmpbuf));
+        decimal_itoa(file_index, tmpbuf);
+        strcat(mnt_content.mnt_dir, LOG_PATH);
+        strcat(mnt_content.mnt_dir, tmpbuf);
+        strcat(mnt_content.mnt_dir, ".txt");
+    
+        printk("\nThe log path is : %s\n", mnt_content.mnt_dir);
+    
+        /* create the log file */
+        fdKmsg = sys_open(mnt_content.mnt_dir, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+        if (fdKmsg >= 0)
+        {
+            int lenKmsg = 0;
+        
+            /* write kernel log to the file */
+            lenKmsg = sys_write(fdKmsg, kmsg_buf, KMSG_BUF_LEN);
+            if (KMSG_BUF_LEN != lenKmsg)
+            {
+                printk("\nlenKmsg is not equal to KMSG_BUF_LEN\n");
+            }
+        }
+        else
+        {
+            printk("\nfdKmsg is equal to: %d\n", fdKmsg);
+            ext4_kmsg_flag = 0;
+            sys_close(fdMounts);
+            sys_close(fdInfo);
+            /* Restore the old space */
+            set_fs(old_fs);
+            return;
+        }
+
+        /* 10 files, but only loop 1~9, number 0 file need to be remained */
+        file_index++;
+        if (file_index >= 10)
+        {
+            file_index = 1;
+        }
+        
+        /* we need to record the current file index */
+        memset(tmpbuf, 0, sizeof(tmpbuf));
+        decimal_itoa(file_index, tmpbuf);
+        strcat(tmpbuf, "\n");
+        sys_lseek(fdInfo, 0, SEEK_SET);
+        sys_write(fdInfo, tmpbuf, strlen(tmpbuf));
+
+        /* close the opened file */
+        sys_close(fdKmsg);
+        sys_close(fdMounts);
+        sys_close(fdInfo);
+    
+        /* Restore the old space */
+        set_fs(old_fs);
+        
+        /* release the mutex flag */
+        ext4_kmsg_flag = 0;
+    }
+    
+    return;
+}
+#endif
+
 static void ext4_handle_error(struct super_block *sb)
 {
 	if (sb->s_flags & MS_RDONLY)
 		return;
+        
+#ifdef CONFIG_EXT4_HUAWEI_DEBUG    
+    printk("\next4_handle_kmsg is called\n");
+    ext4_handle_kmsg();
+#endif
 
 	if (!test_opt(sb, ERRORS_CONT)) {
 		journal_t *journal = EXT4_SB(sb)->s_journal;
@@ -500,7 +871,6 @@ void __ext4_error(struct super_block *sb, const char *function,
 	printk(KERN_CRIT "EXT4-fs error (device %s): %s:%d: comm %s: %pV\n",
 	       sb->s_id, function, line, current->comm, &vaf);
 	va_end(args);
-	save_error_info(sb, function, line);
 
 	ext4_handle_error(sb);
 }
@@ -935,7 +1305,6 @@ static struct inode *ext4_alloc_inode(struct super_block *sb)
 	ei->i_reserved_meta_blocks = 0;
 	ei->i_allocated_meta_blocks = 0;
 	ei->i_da_metadata_calc_len = 0;
-	ei->i_da_metadata_calc_last_lblock = 0;
 	spin_lock_init(&(ei->i_block_reservation_lock));
 #ifdef CONFIG_QUOTA
 	ei->i_reserved_quota = 0;
@@ -1602,7 +1971,9 @@ static int parse_options(char *options, struct super_block *sb,
 			 unsigned int *journal_ioprio,
 			 int is_remount)
 {
+#ifdef CONFIG_QUOTA
 	struct ext4_sb_info *sbi = EXT4_SB(sb);
+#endif
 	char *p;
 	substring_t args[MAX_OPT_ARGS];
 	int token;
@@ -1651,16 +2022,6 @@ static int parse_options(char *options, struct super_block *sb,
 		}
 	}
 #endif
-	if (test_opt(sb, DIOREAD_NOLOCK)) {
-		int blocksize =
-			BLOCK_SIZE << le32_to_cpu(sbi->s_es->s_log_block_size);
-
-		if (blocksize < PAGE_CACHE_SIZE) {
-			ext4_msg(sb, KERN_ERR, "can't mount with "
-				 "dioread_nolock if block size != PAGE_SIZE");
-			return 0;
-		}
-	}
 	return 1;
 }
 
@@ -1703,7 +2064,7 @@ static inline void ext4_show_quota_options(struct seq_file *seq,
 
 static const char *token2str(int token)
 {
-	const struct match_token *t;
+	static const struct match_token *t;
 
 	for (t = tokens; t->token != Opt_err; t++)
 		if (t->token == token && !strchr(t->pattern, '='))
@@ -1910,8 +2271,8 @@ static int ext4_fill_flex_info(struct super_block *sb)
 		flex_group = ext4_flex_group(sbi, i);
 		atomic_add(ext4_free_inodes_count(sb, gdp),
 			   &sbi->s_flex_groups[flex_group].free_inodes);
-		atomic64_add(ext4_free_group_clusters(sb, gdp),
-			     &sbi->s_flex_groups[flex_group].free_clusters);
+		atomic_add(ext4_free_group_clusters(sb, gdp),
+			   &sbi->s_flex_groups[flex_group].free_clusters);
 		atomic_add(ext4_used_dirs_count(sb, gdp),
 			   &sbi->s_flex_groups[flex_group].used_dirs);
 	}
@@ -2123,9 +2484,7 @@ static void ext4_orphan_cleanup(struct super_block *sb,
 				__func__, inode->i_ino, inode->i_size);
 			jbd_debug(2, "truncating inode %lu to %lld bytes\n",
 				  inode->i_ino, inode->i_size);
-			mutex_lock(&inode->i_mutex);
 			ext4_truncate(inode);
-			mutex_unlock(&inode->i_mutex);
 			nr_truncates++;
 		} else {
 			ext4_msg(sb, KERN_DEBUG,
@@ -2589,11 +2948,10 @@ static void print_daily_error_info(unsigned long arg)
 	es = sbi->s_es;
 
 	if (es->s_error_count)
-		/* fsck newer than v1.41.13 is needed to clean this condition. */
-		ext4_msg(sb, KERN_NOTICE, "error count since last fsck: %u",
+		ext4_msg(sb, KERN_NOTICE, "error count: %u",
 			 le32_to_cpu(es->s_error_count));
 	if (es->s_first_error_time) {
-		printk(KERN_NOTICE "EXT4-fs (%s): initial error at time %u: %.*s:%d",
+		printk(KERN_NOTICE "EXT4-fs (%s): initial error at %u: %.*s:%d",
 		       sb->s_id, le32_to_cpu(es->s_first_error_time),
 		       (int) sizeof(es->s_first_error_func),
 		       es->s_first_error_func,
@@ -2607,7 +2965,7 @@ static void print_daily_error_info(unsigned long arg)
 		printk("\n");
 	}
 	if (es->s_last_error_time) {
-		printk(KERN_NOTICE "EXT4-fs (%s): last error at time %u: %.*s:%d",
+		printk(KERN_NOTICE "EXT4-fs (%s): last error at %u: %.*s:%d",
 		       sb->s_id, le32_to_cpu(es->s_last_error_time),
 		       (int) sizeof(es->s_last_error_func),
 		       es->s_last_error_func,
@@ -2863,6 +3221,7 @@ static struct ext4_li_request *ext4_li_request_new(struct super_block *sb,
 {
 	struct ext4_sb_info *sbi = EXT4_SB(sb);
 	struct ext4_li_request *elr;
+	unsigned long rnd;
 
 	elr = kzalloc(sizeof(*elr), GFP_KERNEL);
 	if (!elr)
@@ -2877,8 +3236,10 @@ static struct ext4_li_request *ext4_li_request_new(struct super_block *sb,
 	 * spread the inode table initialization requests
 	 * better.
 	 */
-	elr->lr_next_sched = jiffies + (prandom_u32() %
-				(EXT4_DEF_LI_MAX_START_DELAY * HZ));
+	get_random_bytes(&rnd, sizeof(rnd));
+	elr->lr_next_sched = jiffies + (unsigned long)rnd %
+			     (EXT4_DEF_LI_MAX_START_DELAY * HZ);
+
 	return elr;
 }
 
@@ -2954,118 +3315,6 @@ static void ext4_destroy_lazyinit_thread(void)
 		return;
 
 	kthread_stop(ext4_lazyinit_task);
-}
-
-/*
- * Note: calculating the overhead so we can be compatible with
- * historical BSD practice is quite difficult in the face of
- * clusters/bigalloc.  This is because multiple metadata blocks from
- * different block group can end up in the same allocation cluster.
- * Calculating the exact overhead in the face of clustered allocation
- * requires either O(all block bitmaps) in memory or O(number of block
- * groups**2) in time.  We will still calculate the superblock for
- * older file systems --- and if we come across with a bigalloc file
- * system with zero in s_overhead_clusters the estimate will be close to
- * correct especially for very large cluster sizes --- but for newer
- * file systems, it's better to calculate this figure once at mkfs
- * time, and store it in the superblock.  If the superblock value is
- * present (even for non-bigalloc file systems), we will use it.
- */
-static int count_overhead(struct super_block *sb, ext4_group_t grp,
-			  char *buf)
-{
-	struct ext4_sb_info	*sbi = EXT4_SB(sb);
-	struct ext4_group_desc	*gdp;
-	ext4_fsblk_t		first_block, last_block, b;
-	ext4_group_t		i, ngroups = ext4_get_groups_count(sb);
-	int			s, j, count = 0;
-
-	if (!EXT4_HAS_RO_COMPAT_FEATURE(sb, EXT4_FEATURE_RO_COMPAT_BIGALLOC))
-		return (ext4_bg_has_super(sb, grp) + ext4_bg_num_gdb(sb, grp) +
-			sbi->s_itb_per_group + 2);
-
-	first_block = le32_to_cpu(sbi->s_es->s_first_data_block) +
-		(grp * EXT4_BLOCKS_PER_GROUP(sb));
-	last_block = first_block + EXT4_BLOCKS_PER_GROUP(sb) - 1;
-	for (i = 0; i < ngroups; i++) {
-		gdp = ext4_get_group_desc(sb, i, NULL);
-		b = ext4_block_bitmap(sb, gdp);
-		if (b >= first_block && b <= last_block) {
-			ext4_set_bit(EXT4_B2C(sbi, b - first_block), buf);
-			count++;
-		}
-		b = ext4_inode_bitmap(sb, gdp);
-		if (b >= first_block && b <= last_block) {
-			ext4_set_bit(EXT4_B2C(sbi, b - first_block), buf);
-			count++;
-		}
-		b = ext4_inode_table(sb, gdp);
-		if (b >= first_block && b + sbi->s_itb_per_group <= last_block)
-			for (j = 0; j < sbi->s_itb_per_group; j++, b++) {
-				int c = EXT4_B2C(sbi, b - first_block);
-				ext4_set_bit(c, buf);
-				count++;
-			}
-		if (i != grp)
-			continue;
-		s = 0;
-		if (ext4_bg_has_super(sb, grp)) {
-			ext4_set_bit(s++, buf);
-			count++;
-		}
-		for (j = ext4_bg_num_gdb(sb, grp); j > 0; j--) {
-			ext4_set_bit(EXT4_B2C(sbi, s++), buf);
-			count++;
-		}
-	}
-	if (!count)
-		return 0;
-	return EXT4_CLUSTERS_PER_GROUP(sb) -
-		ext4_count_free(buf, EXT4_CLUSTERS_PER_GROUP(sb) / 8);
-}
-
-/*
- * Compute the overhead and stash it in sbi->s_overhead
- */
-int ext4_calculate_overhead(struct super_block *sb)
-{
-	struct ext4_sb_info *sbi = EXT4_SB(sb);
-	struct ext4_super_block *es = sbi->s_es;
-	ext4_group_t i, ngroups = ext4_get_groups_count(sb);
-	ext4_fsblk_t overhead = 0;
-	char *buf = (char *) get_zeroed_page(GFP_KERNEL);
-
-	memset(buf, 0, PAGE_SIZE);
-	if (!buf)
-		return -ENOMEM;
-
-	/*
-	 * Compute the overhead (FS structures).  This is constant
-	 * for a given filesystem unless the number of block groups
-	 * changes so we cache the previous value until it does.
-	 */
-
-	/*
-	 * All of the blocks before first_data_block are overhead
-	 */
-	overhead = EXT4_B2C(sbi, le32_to_cpu(es->s_first_data_block));
-
-	/*
-	 * Add the overhead found in each block group
-	 */
-	for (i = 0; i < ngroups; i++) {
-		int blks;
-
-		blks = count_overhead(sb, i, buf);
-		overhead += blks;
-		if (blks)
-			memset(buf, 0, PAGE_SIZE);
-		cond_resched();
-	}
-	sbi->s_overhead = overhead;
-	smp_wmb();
-	free_page((unsigned long) buf);
-	return 0;
 }
 
 static int ext4_fill_super(struct super_block *sb, void *data, int silent)
@@ -3230,11 +3479,20 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 		}
 		if (test_opt(sb, DIOREAD_NOLOCK)) {
 			ext4_msg(sb, KERN_ERR, "can't mount with "
-				 "both data=journal and dioread_nolock");
+				 "both data=journal and delalloc");
 			goto failed_mount;
 		}
 		if (test_opt(sb, DELALLOC))
 			clear_opt(sb, DELALLOC);
+	}
+
+	blocksize = BLOCK_SIZE << le32_to_cpu(es->s_log_block_size);
+	if (test_opt(sb, DIOREAD_NOLOCK)) {
+		if (blocksize < PAGE_SIZE) {
+			ext4_msg(sb, KERN_ERR, "can't mount with "
+				 "dioread_nolock if block size != PAGE_SIZE");
+			goto failed_mount;
+		}
 	}
 
 	sb->s_flags = (sb->s_flags & ~MS_POSIXACL) |
@@ -3278,7 +3536,6 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 	if (!ext4_feature_set_ok(sb, (sb->s_flags & MS_RDONLY)))
 		goto failed_mount;
 
-	blocksize = BLOCK_SIZE << le32_to_cpu(es->s_log_block_size);
 	if (blocksize < EXT4_MIN_BLOCK_SIZE ||
 	    blocksize > EXT4_MAX_BLOCK_SIZE) {
 		ext4_msg(sb, KERN_ERR,
@@ -3368,22 +3625,16 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 	for (i = 0; i < 4; i++)
 		sbi->s_hash_seed[i] = le32_to_cpu(es->s_hash_seed[i]);
 	sbi->s_def_hash_version = es->s_def_hash_version;
-	if (EXT4_HAS_COMPAT_FEATURE(sb, EXT4_FEATURE_COMPAT_DIR_INDEX)) {
-		i = le32_to_cpu(es->s_flags);
-		if (i & EXT2_FLAGS_UNSIGNED_HASH)
-			sbi->s_hash_unsigned = 3;
-		else if ((i & EXT2_FLAGS_SIGNED_HASH) == 0) {
+	i = le32_to_cpu(es->s_flags);
+	if (i & EXT2_FLAGS_UNSIGNED_HASH)
+		sbi->s_hash_unsigned = 3;
+	else if ((i & EXT2_FLAGS_SIGNED_HASH) == 0) {
 #ifdef __CHAR_UNSIGNED__
-			if (!(sb->s_flags & MS_RDONLY))
-				es->s_flags |=
-					cpu_to_le32(EXT2_FLAGS_UNSIGNED_HASH);
-			sbi->s_hash_unsigned = 3;
+		es->s_flags |= cpu_to_le32(EXT2_FLAGS_UNSIGNED_HASH);
+		sbi->s_hash_unsigned = 3;
 #else
-			if (!(sb->s_flags & MS_RDONLY))
-				es->s_flags |=
-					cpu_to_le32(EXT2_FLAGS_SIGNED_HASH);
+		es->s_flags |= cpu_to_le32(EXT2_FLAGS_SIGNED_HASH);
 #endif
-		}
 	}
 
 	/* Handle clustersize */
@@ -3681,18 +3932,6 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 
 no_journal:
 	/*
-	 * Get the # of file system overhead blocks from the
-	 * superblock if present.
-	 */
-	if (es->s_overhead_clusters)
-		sbi->s_overhead = le32_to_cpu(es->s_overhead_clusters);
-	else {
-		ret = ext4_calculate_overhead(sb);
-		if (ret)
-			goto failed_mount_wq;
-	}
-
-	/*
 	 * The maximum number of concurrent works can be high and
 	 * concurrency isn't really necessary.  Limit it to 1.
 	 */
@@ -3727,8 +3966,7 @@ no_journal:
 		goto failed_mount4;
 	}
 
-	if (ext4_setup_super(sb, es, sb->s_flags & MS_RDONLY))
-		sb->s_flags |= MS_RDONLY;
+	ext4_setup_super(sb, es, sb->s_flags & MS_RDONLY);
 
 	/* determine the minimum size of new large inodes, if present */
 	if (sbi->s_inode_size > EXT4_GOOD_OLD_INODE_SIZE) {
@@ -3806,6 +4044,14 @@ no_journal:
 		mod_timer(&sbi->s_err_report, jiffies + 300*HZ); /* 5 minutes */
 
 	kfree(orig_data);
+  
+	if (test_opt(sb, ERRORS_PANIC))
+    	ext4_msg(sb, KERN_INFO, "mounted filesystem errors=panic");
+	if (test_opt(sb, ERRORS_CONT))
+    	ext4_msg(sb, KERN_INFO, "mounted filesystem errors=continue");
+	if (test_opt(sb, ERRORS_RO))
+    	ext4_msg(sb, KERN_INFO, "mounted filesystem errors=remount-ro");
+ 
 	return 0;
 
 cantfind_ext4:
@@ -4241,7 +4487,6 @@ static void ext4_clear_journal_err(struct super_block *sb,
 		ext4_commit_super(sb, 1);
 
 		jbd2_journal_clear_err(journal);
-		jbd2_journal_update_sb_errno(journal);
 	}
 }
 
@@ -4401,21 +4646,6 @@ static int ext4_remount(struct super_block *sb, int *flags, char *data)
 		goto restore_opts;
 	}
 
-	if (test_opt(sb, DATA_FLAGS) == EXT4_MOUNT_JOURNAL_DATA) {
-		if (test_opt2(sb, EXPLICIT_DELALLOC)) {
-			ext4_msg(sb, KERN_ERR, "can't mount with "
-				 "both data=journal and delalloc");
-			err = -EINVAL;
-			goto restore_opts;
-		}
-		if (test_opt(sb, DIOREAD_NOLOCK)) {
-			ext4_msg(sb, KERN_ERR, "can't mount with "
-				 "both data=journal and dioread_nolock");
-			err = -EINVAL;
-			goto restore_opts;
-		}
-	}
-
 	if (sbi->s_mount_flags & EXT4_MF_FS_ABORTED)
 		ext4_abort(sb, "Abort forced by user");
 
@@ -4530,7 +4760,7 @@ static int ext4_remount(struct super_block *sb, int *flags, char *data)
 	}
 
 	ext4_setup_system_zone(sb);
-	if (sbi->s_journal == NULL && !(old_sb_flags & MS_RDONLY))
+	if (sbi->s_journal == NULL)
 		ext4_commit_super(sb, 1);
 
 #ifdef CONFIG_QUOTA
@@ -4571,21 +4801,67 @@ restore_opts:
 	return err;
 }
 
+/*
+ * Note: calculating the overhead so we can be compatible with
+ * historical BSD practice is quite difficult in the face of
+ * clusters/bigalloc.  This is because multiple metadata blocks from
+ * different block group can end up in the same allocation cluster.
+ * Calculating the exact overhead in the face of clustered allocation
+ * requires either O(all block bitmaps) in memory or O(number of block
+ * groups**2) in time.  We will still calculate the superblock for
+ * older file systems --- and if we come across with a bigalloc file
+ * system with zero in s_overhead_clusters the estimate will be close to
+ * correct especially for very large cluster sizes --- but for newer
+ * file systems, it's better to calculate this figure once at mkfs
+ * time, and store it in the superblock.  If the superblock value is
+ * present (even for non-bigalloc file systems), we will use it.
+ */
 static int ext4_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
 	struct super_block *sb = dentry->d_sb;
 	struct ext4_sb_info *sbi = EXT4_SB(sb);
 	struct ext4_super_block *es = sbi->s_es;
-	ext4_fsblk_t overhead = 0;
+	struct ext4_group_desc *gdp;
 	u64 fsid;
 	s64 bfree;
 
-	if (!test_opt(sb, MINIX_DF))
-		overhead = sbi->s_overhead;
+	if (test_opt(sb, MINIX_DF)) {
+		sbi->s_overhead_last = 0;
+	} else if (es->s_overhead_clusters) {
+		sbi->s_overhead_last = le32_to_cpu(es->s_overhead_clusters);
+	} else if (sbi->s_blocks_last != ext4_blocks_count(es)) {
+		ext4_group_t i, ngroups = ext4_get_groups_count(sb);
+		ext4_fsblk_t overhead = 0;
+
+		/*
+		 * Compute the overhead (FS structures).  This is constant
+		 * for a given filesystem unless the number of block groups
+		 * changes so we cache the previous value until it does.
+		 */
+
+		/*
+		 * All of the blocks before first_data_block are
+		 * overhead
+		 */
+		overhead = EXT4_B2C(sbi, le32_to_cpu(es->s_first_data_block));
+
+		/*
+		 * Add the overhead found in each block group
+		 */
+		for (i = 0; i < ngroups; i++) {
+			gdp = ext4_get_group_desc(sb, i, NULL);
+			overhead += ext4_num_overhead_clusters(sb, i, gdp);
+			cond_resched();
+		}
+		sbi->s_overhead_last = overhead;
+		smp_wmb();
+		sbi->s_blocks_last = ext4_blocks_count(es);
+	}
 
 	buf->f_type = EXT4_SUPER_MAGIC;
 	buf->f_bsize = sb->s_blocksize;
-	buf->f_blocks = ext4_blocks_count(es) - EXT4_C2B(sbi, sbi->s_overhead);
+	buf->f_blocks = (ext4_blocks_count(es) -
+			 EXT4_C2B(sbi, sbi->s_overhead_last));
 	bfree = percpu_counter_sum_positive(&sbi->s_freeclusters_counter) -
 		percpu_counter_sum_positive(&sbi->s_dirtyclusters_counter);
 	/* prevent underflow in case that few free space is available */

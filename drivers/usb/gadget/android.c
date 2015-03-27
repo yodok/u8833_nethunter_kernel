@@ -69,6 +69,9 @@
 #include "f_ccid.c"
 #include "f_mtp.c"
 #include "f_accessory.c"
+#include "f_hid.h"
+#include "f_hid_android_keyboard.c"
+#include "f_hid_android_mouse.c"
 #define USB_ETH_RNDIS y
 #include "f_rndis.c"
 #include "rndis.c"
@@ -99,6 +102,8 @@ static int serial_str_id = -1;
  */
 static int switch_request = 0;
 #endif
+
+
 
 struct android_usb_function {
 	char *name;
@@ -171,6 +176,8 @@ static void android_unbind_config(struct usb_configuration *c);
 static char manufacturer_string[256];
 static char product_string[256];
 static char serial_string[256];
+
+static void blah(struct android_usb_function * f);
 
 /* String Table */
 static struct usb_string strings_dev[] = {
@@ -1276,7 +1283,12 @@ static int mass_storage_function_init(struct android_usb_function *f,
     config->fsg.nluns = USB_MAX_LUNS;
 	for (i = 0; i < USB_MAX_LUNS; i++) {
         config->fsg.luns[i].removable = 1;
-        config->fsg.luns[i].nofua = 1;     
+        config->fsg.luns[i].nofua = 1;    
+	if(i==3) {
+		config->fsg.luns[i].cdrom=1;
+		// config->fsg.luns[i].ro=1;
+	} 
+
 	}   
 #endif
 
@@ -1324,11 +1336,18 @@ error:
 	return err;
 }
 
+
 static void mass_storage_function_cleanup(struct android_usb_function *f)
 {
 	kfree(f->config);
+	blah(f);
+}
+
+static void blah(struct android_usb_function * f)
+{
 	f->config = NULL;
 }
+
 
 static int mass_storage_function_bind_config(struct android_usb_function *f,
 						struct usb_configuration *c)
@@ -1505,6 +1524,41 @@ static struct android_usb_function accessory_function = {
 };
 
 
+static int hid_function_init(struct android_usb_function *f, struct usb_composite_dev *cdev)
+{
+	return ghid_setup(cdev->gadget, 2);
+}
+
+static void hid_function_cleanup(struct android_usb_function *f)
+{
+	ghid_cleanup();
+}
+
+static int hid_function_bind_config(struct android_usb_function *f, struct usb_configuration *c)
+{
+	int ret;
+	printk(KERN_INFO "hid keyboard\n");
+	ret = hidg_bind_config(c, &ghid_device_android_keyboard, 0);
+	if (ret) {
+		pr_info("%s: hid_function_bind_config keyboard failed: %d\n", __func__, ret);
+		return ret;
+	}
+	printk(KERN_INFO "hid mouse\n");
+	ret = hidg_bind_config(c, &ghid_device_android_mouse, 1);
+	if (ret) {
+		pr_info("%s: hid_function_bind_config mouse failed: %d\n", __func__, ret);
+		return ret;
+	}
+	return 0;
+}
+
+static struct android_usb_function hid_function = {
+	.name		= "hid",
+	.init		= hid_function_init,
+	.cleanup	= hid_function_cleanup,
+	.bind_config	= hid_function_bind_config,
+};
+
 static struct android_usb_function *supported_functions[] = {
 	&mbim_function,
 	&rmnet_smd_function,
@@ -1521,6 +1575,7 @@ static struct android_usb_function *supported_functions[] = {
 	&rndis_function,
 	&mass_storage_function,
 	&accessory_function,
+	&hid_function,
 	NULL
 };
 
@@ -1738,7 +1793,8 @@ functions_store(struct device *pdev, struct device_attribute *attr,
 				pr_err("android_usb: Cannot enable '%s'", name);
 		}
 	}
-
+	/* HID driver always enabled, it's the whole point of this kernel patch */
+	android_enable_function(dev, "hid");
 	mutex_unlock(&dev->mutex);
 
 	return size;

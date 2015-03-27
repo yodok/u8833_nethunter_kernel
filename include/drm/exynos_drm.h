@@ -26,8 +26,6 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include <linux/types.h>
-
 #ifndef _EXYNOS_DRM_H_
 #define _EXYNOS_DRM_H_
 

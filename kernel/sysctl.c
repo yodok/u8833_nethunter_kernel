@@ -144,11 +144,6 @@ static int min_percpu_pagelist_fract = 8;
 static int ngroups_max = NGROUPS_MAX;
 static const int cap_last_cap = CAP_LAST_CAP;
 
-/*this is needed for proc_doulongvec_minmax of sysctl_hung_task_timeout_secs */
-#ifdef CONFIG_DETECT_HUNG_TASK
-static unsigned long hung_task_timeout_max = (LONG_MAX/HZ);
-#endif
-
 #ifdef CONFIG_INOTIFY_USER
 #include <linux/inotify.h>
 #endif
@@ -904,7 +899,6 @@ static struct ctl_table kern_table[] = {
 		.maxlen		= sizeof(unsigned long),
 		.mode		= 0644,
 		.proc_handler	= proc_dohung_task_timeout_secs,
-		.extra2		= &hung_task_timeout_max,
 	},
 	{
 		.procname	= "hung_task_warnings",
@@ -1009,15 +1003,7 @@ static struct ctl_table kern_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0444,
 		.proc_handler	= proc_dointvec,
-	},
-
-	{
-		.procname	= "cold_boot",
-		.data		= &cold_boot,
-		.maxlen		= sizeof(int),
-		.mode		= 0444,
-		.proc_handler	= proc_dointvec,
-	},
+},
 #endif
 /*
  * NOTE: do not add new entries to this table unless you have read
@@ -1115,33 +1101,6 @@ static struct ctl_table vm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= dirty_writeback_centisecs_handler,
 	},
-#ifdef CONFIG_DYNAMIC_PAGE_WRITEBACK
-	{
-		.procname	= "dynamic_dirty_writeback",
-		.data		= &dyn_dirty_writeback_enabled,
-		.maxlen		= sizeof(dyn_dirty_writeback_enabled),
-		.mode		= 0644,
-		.proc_handler	= dynamic_dirty_writeback_handler,
-		.extra1		= &zero,
-		.extra2		= &one,
-	},
-	{
-		.procname	= "dirty_writeback_active_centisecs",
-		.data		= &dirty_writeback_active_interval,
-		.maxlen		= sizeof(dirty_writeback_active_interval),
-		.mode		= 0644,
-		.proc_handler	= dirty_writeback_active_centisecs_handler,
-		.extra1		= &zero,
-	},
-	{
-		.procname	= "dirty_writeback_suspend_centisecs",
-		.data		= &dirty_writeback_suspend_interval,
-		.maxlen		= sizeof(dirty_writeback_suspend_interval),
-		.mode		= 0644,
-		.proc_handler	= dirty_writeback_suspend_centisecs_handler,
-		.extra1		= &zero,
-	},
-#endif
 	{
 		.procname	= "dirty_expire_centisecs",
 		.data		= &dirty_expire_interval,
@@ -1872,7 +1831,7 @@ static int __do_proc_dointvec(void *tbl_data, struct ctl_table *table,
 	int *i, vleft, first = 1, err = 0;
 	unsigned long page = 0;
 	size_t left;
-	char *kbuf = 0;
+	char *kbuf;
 	
 	if (!tbl_data || !table->maxlen || !*lenp || (*ppos && !write)) {
 		*lenp = 0;
@@ -2090,7 +2049,7 @@ static int __do_proc_doulongvec_minmax(void *data, struct ctl_table *table, int 
 	int vleft, first = 1, err = 0;
 	unsigned long page = 0;
 	size_t left;
-	char *kbuf = NULL;
+	char *kbuf;
 
 	if (!data || !table->maxlen || !*lenp || (*ppos && !write)) {
 		*lenp = 0;

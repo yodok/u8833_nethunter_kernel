@@ -806,7 +806,7 @@ static int msm_nand_read_oob(struct mtd_info *mtd, loff_t from,
 	uint32_t oob_len;
 	uint32_t sectordatasize;
 	uint32_t sectoroobsize;
-	int err = 0, pageerr = 0, rawerr = 0;
+	int err, pageerr, rawerr;
 	dma_addr_t data_dma_addr = 0;
 	dma_addr_t oob_dma_addr = 0;
 	dma_addr_t data_dma_addr_curr = 0;
@@ -1232,7 +1232,7 @@ static int msm_nand_read_oob_dualnandc(struct mtd_info *mtd, loff_t from,
 	uint32_t oob_len;
 	uint32_t sectordatasize;
 	uint32_t sectoroobsize;
-	int err = 0, pageerr = 0, rawerr = 0;
+	int err, pageerr, rawerr;
 	dma_addr_t data_dma_addr = 0;
 	dma_addr_t oob_dma_addr = 0;
 	dma_addr_t data_dma_addr_curr = 0;
@@ -3069,12 +3069,11 @@ static int msm_nand_write(struct mtd_info *mtd, loff_t to, size_t len,
 }
 
 
-#if 0
-//#ifdef CONFIG_HUAWEI_KERNEL
+#ifdef CONFIG_HUAWEI_KERNEL
 #include <asm/delay.h>
 extern int msm_dmov_exec_cmd_apanic(unsigned id, unsigned int cmdptr);
 
-/* msm_nand_write_oob_apanic is inherit from msm_nand_write_oob.
+/* msm_nand_write_oob_apanic is inherit from msm_nand_write_oob. 
  * when in panic the irq is lock, so all wait about irq is will not return,
  * we use the while poll to instead of the waitting operator.
  */
@@ -3105,7 +3104,7 @@ msm_nand_write_oob_apanic(struct mtd_info *mtd, loff_t to, struct mtd_oob_ops *o
     unsigned page = 0;
     uint32_t oob_len;
     uint32_t sectordatawritesize;
-    int err = 0;
+    int err;
     dma_addr_t data_dma_addr = 0;
     dma_addr_t oob_dma_addr = 0;
     dma_addr_t data_dma_addr_curr = 0;
@@ -3353,10 +3352,10 @@ msm_nand_write_oob_apanic(struct mtd_info *mtd, loff_t to, struct mtd_oob_ops *o
             CMD_PTR_LP;
 
         mb();
-        /* we use the while poll to instead of the waitting
+        /* we use the while poll to instead of the waitting 
          * operator in msm_dmov_exec_cmd_apanic
          */
-		msm_dmov_exec_cmd_apanic(chip->dma_channel,
+		msm_dmov_exec_cmd_apanic(chip->dma_channel, 
             DMOV_CMD_PTR_LIST | DMOV_CMD_ADDR(
                 msm_virt_to_dma(chip, &dma_buffer->cmdptr)));
         mb();
@@ -3418,7 +3417,7 @@ err_dma_map_oobbuf_failed:
     return err;
 }
 
-/* msm_nand_write_oob_dualnandc_apanic is inherit from msm_nand_write_oob_dualnandc.
+/* msm_nand_write_oob_dualnandc_apanic is inherit from msm_nand_write_oob_dualnandc. 
  * when in panic the irq is lock, so all wait about irq is will not return,
  * we use the while poll to instead of the waitting operator.
  */
@@ -3464,7 +3463,7 @@ msm_nand_write_oob_dualnandc_apanic(struct mtd_info *mtd, loff_t to,
     unsigned page = 0;
     uint32_t oob_len;
     uint32_t sectordatawritesize;
-    int err = 0;
+    int err;
     dma_addr_t data_dma_addr = 0;
     dma_addr_t oob_dma_addr = 0;
     dma_addr_t data_dma_addr_curr = 0;
@@ -3975,10 +3974,10 @@ msm_nand_write_oob_dualnandc_apanic(struct mtd_info *mtd, loff_t to,
         ((msm_virt_to_dma(chip, dma_buffer->cmd) >> 3) | CMD_PTR_LP);
 
         mb();
-        /* we use the while poll to instead of the waitting
+        /* we use the while poll to instead of the waitting 
          * operator in msm_dmov_exec_cmd_apanic
          */
-		msm_dmov_exec_cmd_apanic(chip->dma_channel,
+		msm_dmov_exec_cmd_apanic(chip->dma_channel, 
             DMOV_CMD_PTR_LIST | DMOV_CMD_ADDR(
                 msm_virt_to_dma(chip, &dma_buffer->cmdptr)));
         mb();
@@ -4051,7 +4050,7 @@ err_dma_map_oobbuf_failed:
     return err;
 }
 
-/* msm_nand_write_apanic is inherit from msm_nand_write.
+/* msm_nand_write_apanic is inherit from msm_nand_write. 
  * when in panic the irq is lock, so all wait about irq is will not return,
  * we use the while poll to instead of the waitting operator.
  */
@@ -4080,7 +4079,7 @@ static int msm_nand_write_apanic(struct mtd_info *mtd, loff_t to, size_t len,
 static int
 msm_nand_erase(struct mtd_info *mtd, struct erase_info *instr)
 {
-	int err = 0;
+	int err;
 	struct msm_nand_chip *chip = mtd->priv;
 	struct {
 		dmov_s cmd[6];
@@ -4208,7 +4207,7 @@ msm_nand_erase(struct mtd_info *mtd, struct erase_info *instr)
 static int
 msm_nand_erase_dualnandc(struct mtd_info *mtd, struct erase_info *instr)
 {
-	int err = 0;
+	int err;
 	struct msm_nand_chip *chip = mtd->priv;
 	struct {
 		dmov_s cmd[18];
@@ -7950,8 +7949,7 @@ int msm_nand_scan(struct mtd_info *mtd, int maxchips)
 	mtd->_unpoint = NULL;
 	mtd->_read = msm_nand_read;
 	mtd->_write = msm_nand_write;
-#if 0
-//#ifdef CONFIG_HUAWEI_KERNEL
+#ifdef CONFIG_HUAWEI_KERNEL
 	/* add for android panic support*/
 	mtd->_panic_write = msm_nand_write_apanic;
 #endif
@@ -8065,7 +8063,7 @@ static int __devinit msm_nand_probe(struct platform_device *pdev)
 {
 	struct msm_nand_info *info;
 	struct resource *res;
-	int err = 0;
+	int err;
 	struct flash_platform_data *plat_data;
 
 	plat_data = pdev->dev.platform_data;

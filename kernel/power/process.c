@@ -23,7 +23,7 @@
 /* 
  * Timeout for stopping processes
  */
-unsigned int __read_mostly freeze_timeout_msecs = 20 * MSEC_PER_SEC;
+#define TIMEOUT	(20 * HZ)
 
 static int try_to_freeze_tasks(bool user_only)
 {
@@ -32,14 +32,13 @@ static int try_to_freeze_tasks(bool user_only)
 	unsigned int todo;
 	bool wq_busy = false;
 	struct timeval start, end;
-	u64 elapsed_msecs64;
-	unsigned int elapsed_msecs;
+	u64 elapsed_csecs64;
+	unsigned int elapsed_csecs;
 	bool wakeup = false;
-	int sleep_usecs = USEC_PER_MSEC;
 
 	do_gettimeofday(&start);
 
-	end_time = jiffies + msecs_to_jiffies(freeze_timeout_msecs);
+	end_time = jiffies + TIMEOUT;
 
 	if (!user_only)
 		freeze_workqueues_begin();
@@ -86,18 +85,15 @@ static int try_to_freeze_tasks(bool user_only)
 
 		/*
 		 * We need to retry, but first give the freezing tasks some
-		 * time to enter the refrigerator.  Start with an initial
-		 * 1 ms sleep followed by exponential backoff until 8 ms.
+		 * time to enter the regrigerator.
 		 */
-		usleep_range(sleep_usecs / 2, sleep_usecs);
-		if (sleep_usecs < 8 * USEC_PER_MSEC)
-			sleep_usecs *= 2;
+		msleep(10);
 	}
 
 	do_gettimeofday(&end);
-	elapsed_msecs64 = timeval_to_ns(&end) - timeval_to_ns(&start);
-	do_div(elapsed_msecs64, NSEC_PER_MSEC);
-	elapsed_msecs = elapsed_msecs64;
+	elapsed_csecs64 = timeval_to_ns(&end) - timeval_to_ns(&start);
+	do_div(elapsed_csecs64, NSEC_PER_SEC / 100);
+	elapsed_csecs = elapsed_csecs64;
 
 	if (todo) {
 		/* This does not unfreeze processes that are already frozen
@@ -112,10 +108,10 @@ static int try_to_freeze_tasks(bool user_only)
 		}
 		else {
 			printk("\n");
-			printk(KERN_ERR "Freezing of tasks %s after %d.%03d seconds "
+			printk(KERN_ERR "Freezing of tasks %s after %d.%02d seconds "
 			       "(%d tasks refusing to freeze, wq_busy=%d):\n",
 			       wakeup ? "aborted" : "failed",
-			       elapsed_msecs / 1000, elapsed_msecs % 1000,
+			       elapsed_csecs / 100, elapsed_csecs % 100,
 			       todo - wq_busy, wq_busy);
 		}
 
@@ -124,14 +120,14 @@ static int try_to_freeze_tasks(bool user_only)
 			do_each_thread(g, p) {
 				if (p != current && !freezer_should_skip(p)
 				    && freezing(p) && !frozen(p) &&
-				    elapsed_msecs > 1000)
+				    elapsed_csecs > 100)
 					sched_show_task(p);
 			} while_each_thread(g, p);
 			read_unlock(&tasklist_lock);
 		}
 	} else {
-		printk("(elapsed %d.%03d seconds) ", elapsed_msecs / 1000,
-			elapsed_msecs % 1000);
+		printk("(elapsed %d.%02d seconds) ", elapsed_csecs / 100,
+			elapsed_csecs % 100);
 	}
 
 	return todo ? -EBUSY : 0;
@@ -212,7 +208,6 @@ void thaw_processes(void)
 
 	printk("Restarting tasks ... ");
 
-	__usermodehelper_set_disable_depth(UMH_FREEZING);
 	thaw_workqueues();
 
 	read_lock(&tasklist_lock);

@@ -37,9 +37,6 @@
 
 #include "fault.h"
 
-#define CREATE_TRACE_POINTS
-#include <trace/events/exception.h>
-
 #ifdef CONFIG_MMU
 
 #ifdef CONFIG_KPROBES
@@ -376,13 +373,6 @@ retry:
 	if (likely(!(fault & (VM_FAULT_ERROR | VM_FAULT_BADMAP | VM_FAULT_BADACCESS))))
 		return 0;
 
-	/*
-	 * If we are in kernel mode at this point, we
-	 * have no context to handle this fault with.
-	 */
-	if (!user_mode(regs))
-		goto no_context;
-
 	if (fault & VM_FAULT_OOM) {
 		/*
 		 * We ran out of memory, call the OOM killer, and return to
@@ -392,6 +382,13 @@ retry:
 		pagefault_out_of_memory();
 		return 0;
 	}
+
+	/*
+	 * If we are in kernel mode at this point, we
+	 * have no context to handle this fault with.
+	 */
+	if (!user_mode(regs))
+		goto no_context;
 
 	if (fault & VM_FAULT_SIGBUS) {
 		/*

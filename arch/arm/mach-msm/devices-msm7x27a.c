@@ -13,7 +13,7 @@
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
 #include <linux/dma-mapping.h>
-#include <mach/kgsl.h>
+#include <linux/msm_kgsl.h>
 #include <linux/regulator/machine.h>
 #include <linux/init.h>
 #include <linux/irq.h>
@@ -882,14 +882,6 @@ static struct resource kgsl_3d0_resources[] = {
 static struct kgsl_device_platform_data kgsl_3d0_pdata = {
 	.pwrlevel = {
 		{
-			.gpu_freq = 300000000,
-			.bus_freq = 200000000,
-		},
-		{
-			.gpu_freq = 266000000,
-			.bus_freq = 200000000,
-		},
-		{
 			.gpu_freq = 245760000,
 			.bus_freq = 200000000,
 		},
@@ -898,12 +890,12 @@ static struct kgsl_device_platform_data kgsl_3d0_pdata = {
 			.bus_freq = 160000000,
 		},
 		{
-			.gpu_freq = 192000000,
+			.gpu_freq = 133330000,
 			.bus_freq = 0,
 		},
 	},
 	.init_level = 0,
-	.num_levels = 5,
+	.num_levels = 3,
 	.set_grp_async = set_grp_xbar_async,
 	.idle_timeout = HZ,
 	.strtstp_sleepwake = true,
@@ -938,8 +930,12 @@ void __init msm8x25_kgsl_3d0_init(void)
 		kgsl_3d0_pdata.idle_timeout = HZ/5;
 		kgsl_3d0_pdata.strtstp_sleepwake = false;
 
-		/* 8x25 supports a higher GPU frequency */
-		kgsl_3d0_pdata.pwrlevel[0].gpu_freq = 320000000;
+		if (SOCINFO_VERSION_MAJOR(socinfo_get_version()) >= 2)
+			/* 8x25 v2.0 & above supports a higher GPU frequency */
+			kgsl_3d0_pdata.pwrlevel[0].gpu_freq = 320000000;
+		else
+			kgsl_3d0_pdata.pwrlevel[0].gpu_freq = 300000000;
+
 		kgsl_3d0_pdata.pwrlevel[0].bus_freq = 200000000;
 	}
 }

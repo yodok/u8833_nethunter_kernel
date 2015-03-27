@@ -15,7 +15,6 @@
 
 #include <linux/export.h>
 #include <linux/mm.h>
-#include <linux/vmacache.h>
 #include <linux/mman.h>
 #include <linux/swap.h>
 #include <linux/file.h>
@@ -748,23 +747,16 @@ static void add_vma_to_mm(struct mm_struct *mm, struct vm_area_struct *vma)
  */
 static void delete_vma_from_mm(struct vm_area_struct *vma)
 {
-	int i;
 	struct address_space *mapping;
 	struct mm_struct *mm = vma->vm_mm;
-	struct task_struct *curr = current;
 
 	kenter("%p", vma);
 
 	protect_vma(vma, 0);
 
 	mm->map_count--;
-	for (i = 0; i < VMACACHE_SIZE; i++) {
-		/* if the vma is cached, invalidate the entire cache */
-		if (curr->vmacache[i] == vma) {
-			vmacache_invalidate(curr->mm);
-			break;
-		}
-	}
+	if (mm->mmap_cache == vma)
+		mm->mmap_cache = NULL;
 
 	/* remove the VMA from the mapping */
 	if (vma->vm_file) {
@@ -815,8 +807,8 @@ struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 	struct vm_area_struct *vma;
 
 	/* check the cache first */
-	vma = vmacache_find(mm, addr);
-	if (likely(vma))
+	vma = mm->mmap_cache;
+	if (vma && vma->vm_start <= addr && vma->vm_end > addr)
 		return vma;
 
 	/* trawl the list (there may be multiple mappings in which addr
@@ -825,7 +817,7 @@ struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 		if (vma->vm_start > addr)
 			return NULL;
 		if (vma->vm_end > addr) {
-			vmacache_update(addr, vma);
+			mm->mmap_cache = vma;
 			return vma;
 		}
 	}
@@ -864,8 +856,8 @@ static struct vm_area_struct *find_vma_exact(struct mm_struct *mm,
 	unsigned long end = addr + len;
 
 	/* check the cache first */
-	vma = vmacache_find_exact(mm, addr, end);
-	if (vma)
+	vma = mm->mmap_cache;
+	if (vma && vma->vm_start == addr && vma->vm_end == end)
 		return vma;
 
 	/* trawl the list (there may be multiple mappings in which addr
@@ -876,7 +868,7 @@ static struct vm_area_struct *find_vma_exact(struct mm_struct *mm,
 		if (vma->vm_start > addr)
 			return NULL;
 		if (vma->vm_end == end) {
-			vmacache_update(addr, vma);
+			mm->mmap_cache = vma;
 			return vma;
 		}
 	}
@@ -1863,16 +1855,6 @@ int remap_pfn_range(struct vm_area_struct *vma, unsigned long addr,
 	return 0;
 }
 EXPORT_SYMBOL(remap_pfn_range);
-
-int vm_iomap_memory(struct vm_area_struct *vma, phys_addr_t start, unsigned long len)
-{
-	unsigned long pfn = start >> PAGE_SHIFT;
-	unsigned long vm_len = vma->vm_end - vma->vm_start;
-
-	pfn += vma->vm_pgoff;
-	return io_remap_pfn_range(vma, vma->vm_start, pfn, vm_len, vma->vm_page_prot);
-}
-EXPORT_SYMBOL(vm_iomap_memory);
 
 int remap_vmalloc_range(struct vm_area_struct *vma, void *addr,
 			unsigned long pgoff)

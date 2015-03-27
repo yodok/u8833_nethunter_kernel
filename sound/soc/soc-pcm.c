@@ -500,9 +500,8 @@ static int soc_pcm_close(struct snd_pcm_substream *substream)
 		} else {
 			/* start delayed pop wq here for playback streams */
 			codec_dai->pop_wait = 1;
-			queue_delayed_work(system_power_efficient_wq,
-					   &rtd->delayed_work,
-					   msecs_to_jiffies(rtd->pmdown_time));
+			schedule_delayed_work(&rtd->delayed_work,
+				msecs_to_jiffies(rtd->pmdown_time));
 		}
 	} else {
 		/* capture streams can be powered down now */
@@ -1497,6 +1496,9 @@ int soc_dpcm_be_dai_trigger(struct snd_soc_pcm_runtime *fe, int stream, int cmd)
 	struct snd_soc_dpcm_params *dpcm_params;
 	int ret = 0;
 
+	if ((cmd == SNDRV_PCM_TRIGGER_PAUSE_RELEASE) ||
+				(cmd == SNDRV_PCM_TRIGGER_PAUSE_PUSH))
+		return ret;
 
 	list_for_each_entry(dpcm_params, &fe->dpcm[stream].be_clients, list_be) {
 
@@ -1650,10 +1652,8 @@ int soc_dpcm_fe_dai_trigger(struct snd_pcm_substream *substream, int cmd)
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
-		fe->dpcm[stream].state = SND_SOC_DPCM_STATE_STOP;
-		break;
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
-		fe->dpcm[stream].state = SND_SOC_DPCM_STATE_PAUSED;
+		fe->dpcm[stream].state = SND_SOC_DPCM_STATE_STOP;
 		break;
 	}
 
@@ -1767,13 +1767,7 @@ static int soc_dpcm_be_dai_hw_free(struct snd_soc_pcm_runtime *fe, int stream)
 		if ((be->dpcm[stream].state != SND_SOC_DPCM_STATE_HW_PARAMS) &&
 		    (be->dpcm[stream].state != SND_SOC_DPCM_STATE_PREPARE) &&
 			(be->dpcm[stream].state != SND_SOC_DPCM_STATE_HW_FREE) &&
-		    (be->dpcm[stream].state != SND_SOC_DPCM_STATE_PAUSED) &&
-		    (be->dpcm[stream].state != SND_SOC_DPCM_STATE_STOP) &&
-		    !((be->dpcm[stream].state == SND_SOC_DPCM_STATE_START) &&
-		      ((fe->dpcm[stream].state != SND_SOC_DPCM_STATE_START) &&
-			(fe->dpcm[stream].state != SND_SOC_DPCM_STATE_PAUSED) &&
-			(fe->dpcm[stream].state !=
-						SND_SOC_DPCM_STATE_SUSPEND))))
+		    (be->dpcm[stream].state != SND_SOC_DPCM_STATE_STOP))
 			continue;
 
 		dev_dbg(be->dev, "dpcm: hw_free BE %s\n",
@@ -2588,7 +2582,6 @@ int soc_new_pcm(struct snd_soc_pcm_runtime *rtd, int num)
 		rtd->ops.silence	= platform->driver->ops->silence;
 		rtd->ops.page		= platform->driver->ops->page;
 		rtd->ops.mmap		= platform->driver->ops->mmap;
-		rtd->ops.restart	= platform->driver->ops->restart;
 	}
 
 	if (playback)

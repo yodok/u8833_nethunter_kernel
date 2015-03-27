@@ -41,8 +41,6 @@ static int read_mmp_block(struct super_block *sb, struct buffer_head **bh,
 	 * is not blocked in the elevator. */
 	if (!*bh)
 		*bh = sb_getblk(sb, mmp_block);
-	if (!*bh)
-		return -ENOMEM;
 	if (*bh) {
 		get_bh(*bh);
 		lock_buffer(*bh);
@@ -219,7 +217,7 @@ static unsigned int mmp_new_seq(void)
 	u32 new_seq;
 
 	do {
-		new_seq = prandom_u32();
+		get_random_bytes(&new_seq, sizeof(u32));
 	} while (new_seq > EXT4_MMP_SEQ_MAX);
 
 	return new_seq;

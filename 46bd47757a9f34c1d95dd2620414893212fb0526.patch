@@ -1,0 +1,99 @@
+From 46bd47757a9f34c1d95dd2620414893212fb0526 Mon Sep 17 00:00:00 2001
+From: FrozenCow <frozencow@gmail.com>
+Date: Thu, 4 Jul 2013 12:36:57 +0200
+Subject: [PATCH] usb: gadget: mass_storage: added sysfs entry for cdrom to
+ LUNs
+
+This patch adds a "cdrom" sysfs entry for each mass_storage LUN, just
+like "ro" sysfs entry. This allows switching between USB and CD-ROM
+emulation without reinserting the module or recompiling the kernel.
+
+Change-Id: Idf83c74815b1ad370428ab9d3e5503d5f7bcd3b6
+---
+ drivers/usb/gadget/f_mass_storage.c |  5 +++++
+ drivers/usb/gadget/storage_common.c | 37 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 42 insertions(+)
+
+diff --git a/drivers/usb/gadget/f_mass_storage.c b/drivers/usb/gadget/f_mass_storage.c
+index 4410e99..fefe6bd 100644
+--- a/drivers/usb/gadget/f_mass_storage.c
++++ b/drivers/usb/gadget/f_mass_storage.c
+@@ -2847,6 +2847,7 @@ static int fsg_main_thread(void *common_)
+ static DEVICE_ATTR(ro, 0644, fsg_show_ro, fsg_store_ro);
+ static DEVICE_ATTR(nofua, 0644, fsg_show_nofua, fsg_store_nofua);
+ static DEVICE_ATTR(file, 0644, fsg_show_file, fsg_store_file);
++static DEVICE_ATTR(cdrom, 0644, fsg_show_cdrom, fsg_store_cdrom);
+ #ifdef CONFIG_USB_MSC_PROFILING
+ static DEVICE_ATTR(perf, 0644, fsg_show_perf, fsg_store_perf);
+ #endif
+@@ -2965,6 +2966,9 @@ static struct fsg_common *fsg_common_init(struct fsg_common *common,
+ 		rc = device_create_file(&curlun->dev, &dev_attr_nofua);
+ 		if (rc)
+ 			goto error_luns;
++		rc = device_create_file(&curlun->dev, &dev_attr_cdrom);
++		if (rc)
++			goto error_luns;
+ #ifdef CONFIG_USB_MSC_PROFILING
+ 		rc = device_create_file(&curlun->dev, &dev_attr_perf);
+ 		if (rc)
+@@ -3102,6 +3106,7 @@ static void fsg_common_release(struct kref *ref)
+ #ifdef CONFIG_USB_MSC_PROFILING
+ 			device_remove_file(&lun->dev, &dev_attr_perf);
+ #endif
++			device_remove_file(&lun->dev, &dev_attr_cdrom);
+ 			device_remove_file(&lun->dev, &dev_attr_nofua);
+ 			device_remove_file(&lun->dev, &dev_attr_ro);
+ 			device_remove_file(&lun->dev, &dev_attr_file);
+diff --git a/drivers/usb/gadget/storage_common.c b/drivers/usb/gadget/storage_common.c
+index 7e62c19..06acaeb 100644
+--- a/drivers/usb/gadget/storage_common.c
++++ b/drivers/usb/gadget/storage_common.c
+@@ -801,6 +801,14 @@ static ssize_t fsg_show_nofua(struct device *dev, struct device_attribute *attr,
+ 	return sprintf(buf, "%u\n", curlun->nofua);
+ }
+ 
++static ssize_t fsg_show_cdrom (struct device *dev, struct device_attribute *attr,
++			   char *buf)
++{
++	struct fsg_lun  *curlun = fsg_lun_from_dev(dev);
++
++	return sprintf(buf, "%d\n", curlun->cdrom);
++}
++
+ #ifdef CONFIG_USB_MSC_PROFILING
+ static ssize_t fsg_show_perf(struct device *dev, struct device_attribute *attr,
+ 			      char *buf)
+@@ -956,3 +964,32 @@ static ssize_t fsg_store_file(struct device *dev, struct device_attribute *attr,
+ 	up_write(filesem);
+ 	return (rc < 0 ? rc : count);
+ }
++
++static ssize_t fsg_store_cdrom(struct device *dev, struct device_attribute *attr,
++				  const char *buf, size_t count)
++{
++	ssize_t    rc;
++	struct fsg_lun  *curlun = fsg_lun_from_dev(dev);
++	struct rw_semaphore  *filesem = dev_get_drvdata(dev);
++	unsigned  cdrom;
++
++	rc = kstrtouint(buf, 2, &cdrom);
++	if (rc)
++		return rc;
++
++	/*
++	 * Allow the cdrom status to change only while the
++	 * backing file is closed.
++	 */
++	down_read(filesem);
++	if (fsg_lun_is_open(curlun)) {
++		LDBG(curlun, "cdrom status change prevented\n");
++		rc = -EBUSY;
++	} else {
++		curlun->cdrom = cdrom;
++		LDBG(curlun, "cdrom status set to %d\n", curlun->cdrom);
++		rc = count;
++	}
++	up_read(filesem);
++	return rc;
++}
+\ No newline at end of file

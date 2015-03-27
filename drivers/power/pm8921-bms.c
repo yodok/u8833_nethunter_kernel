@@ -1748,7 +1748,7 @@ EXPORT_SYMBOL(pm8921_bms_get_vsense_avg);
 
 int pm8921_bms_get_battery_current(int *result_ua)
 {
-	int vsense = 0;
+	int vsense;
 
 	if (!the_chip) {
 		pr_err("called before initialization\n");

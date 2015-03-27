@@ -35,7 +35,6 @@ from optparse import OptionParser
 import subprocess
 import os
 import os.path
-import re
 import shutil
 import sys
 
@@ -46,8 +45,8 @@ make_command = ["vmlinux", "modules"]
 make_env = os.environ
 make_env.update({
         'ARCH': 'arm',
+        'CROSS_COMPILE': 'arm-none-linux-gnueabi-',
         'KCONFIG_NOTIMESTAMP': 'true' })
-make_env.setdefault('CROSS_COMPILE', 'arm-none-linux-gnueabi-')
 all_options = {}
 
 def error(msg):
@@ -84,15 +83,12 @@ def update_config(file, str):
 def scan_configs():
     """Get the full list of defconfigs appropriate for this tree."""
     names = {}
-    arch_pats = (
-        r'[fm]sm[0-9]*_defconfig',
-        r'apq*_defconfig',
-        r'qsd*_defconfig',
-        r'omap2*_defconfig',
-        )
-    for p in arch_pats:
-        for n in glob.glob('arch/arm/configs/' + p):
-            names[os.path.basename(n)[:-10]] = n
+    for n in glob.glob('arch/arm/configs/[fm]sm[0-9-]*_defconfig'):
+        names[os.path.basename(n)[:-10]] = n
+    for n in glob.glob('arch/arm/configs/qsd*_defconfig'):
+        names[os.path.basename(n)[:-10]] = n
+    for n in glob.glob('arch/arm/configs/apq*_defconfig'):
+        names[os.path.basename(n)[:-10]] = n
     return names
 
 class Builder:
@@ -146,41 +142,23 @@ def build(target):
     savedefconfig = '%s/defconfig' % dest_dir
     shutil.copyfile(defconfig, dotconfig)
 
-    staging_dir = 'install_staging'
-    modi_dir = '%s' % staging_dir
-    hdri_dir = '%s/usr' % staging_dir
-    shutil.rmtree(os.path.join(dest_dir, staging_dir), ignore_errors=True)
-
     devnull = open('/dev/null', 'r')
     subprocess.check_call(['make', 'O=%s' % dest_dir,
         '%s_defconfig' % target], env=make_env, stdin=devnull)
     devnull.close()
 
     if not all_options.updateconfigs:
-        # Build targets can be dependent upon the completion of previous
-        # build targets, so build them one at a time.
-        cmd_line = ['make',
-            'INSTALL_HDR_PATH=%s' % hdri_dir,
-            'INSTALL_MOD_PATH=%s' % modi_dir,
-            'O=%s' % dest_dir]
-        build_targets = []
-        for c in make_command:
-            if re.match(r'^-{1,2}\w', c):
-                cmd_line.append(c)
-            else:
-                build_targets.append(c)
-        for t in build_targets:
-            build = Builder(log_name)
+        build = Builder(log_name)
 
-            result = build.run(cmd_line + [t])
-            if result != 0:
-                if all_options.keep_going:
-                    failed_targets.append(target)
-                    fail_or_error = error
-                else:
-                    fail_or_error = fail
-                fail_or_error("Failed to build %s, see %s" %
-                              (target, build.logname))
+        result = build.run(['make', 'O=%s' % dest_dir] + make_command)
+
+        if result != 0:
+            if all_options.keep_going:
+                failed_targets.append(target)
+                fail_or_error = error
+            else:
+                fail_or_error = fail
+            fail_or_error("Failed to build %s, see %s" % (target, build.logname))
 
     # Copy the defconfig back.
     if all_options.configs or all_options.updateconfigs:

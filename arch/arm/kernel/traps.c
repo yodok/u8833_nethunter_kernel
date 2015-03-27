@@ -37,20 +37,8 @@
 
 #include "signal.h"
 
-#include <trace/events/exception.h>
+static const char *handler[]= { "prefetch abort", "data abort", "address exception", "interrupt" };
 
-static const char *handler[]= {
-	"prefetch abort",
-	"data abort",
-	"address exception",
-	"interrupt",
-	"undefined instruction",
-};
-
-#ifdef CONFIG_LGE_CRASH_HANDLER
-static int first_call_chain = 0;
-static int first_die = 1;
-#endif
 void *vectors_page;
 
 #ifdef CONFIG_DEBUG_USER
@@ -69,14 +57,7 @@ static void dump_mem(const char *, const char *, unsigned long, unsigned long);
 void dump_backtrace_entry(unsigned long where, unsigned long from, unsigned long frame)
 {
 #ifdef CONFIG_KALLSYMS
-#ifdef CONFIG_LGE_CRASH_HANDLER
-	if (first_call_chain)
-		set_crash_store_enable();
-#endif
 	printk("[<%08lx>] (%pS) from [<%08lx>] (%pS)\n", where, (void *)where, from, (void *)from);
-#ifdef CONFIG_LGE_CRASH_HANDLER
-	set_crash_store_disable();
-#endif
 #else
 	printk("Function entered at [<%08lx>] from [<%08lx>]\n", where, from);
 #endif
@@ -252,119 +233,71 @@ void show_stack(struct task_struct *tsk, unsigned long *sp)
 #define S_ISA " ARM"
 #endif
 
-static int __die(const char *str, int err, struct pt_regs *regs)
+static int __die(const char *str, int err, struct thread_info *thread, struct pt_regs *regs)
 {
-	struct task_struct *tsk = current;
+	struct task_struct *tsk = thread->task;
 	static int die_counter;
 	int ret;
-
-#ifdef CONFIG_LGE_CRASH_HANDLER
-	if (first_die) {
-		first_call_chain = 1;
-		first_die = 0;
-	}
-	set_kernel_crash_magic_number();
-	set_crash_store_enable();
-#endif
 
 	printk(KERN_EMERG "Internal error: %s: %x [#%d]" S_PREEMPT S_SMP
 	       S_ISA "\n", str, err, ++die_counter);
 
-#ifdef CONFIG_LGE_CRASH_HANDLER
-	set_crash_store_disable();
-#endif
-
 	/* trap and error numbers are mostly meaningless on ARM */
 	ret = notify_die(DIE_OOPS, str, regs, err, tsk->thread.trap_no, SIGSEGV);
 	if (ret == NOTIFY_STOP)
-		return 1;
+		return ret;
 
 	print_modules();
 	__show_regs(regs);
 	printk(KERN_EMERG "Process %.*s (pid: %d, stack limit = 0x%p)\n",
-		TASK_COMM_LEN, tsk->comm, task_pid_nr(tsk), end_of_stack(tsk));
+		TASK_COMM_LEN, tsk->comm, task_pid_nr(tsk), thread + 1);
 
 	if (!user_mode(regs) || in_interrupt()) {
 		dump_mem(KERN_EMERG, "Stack: ", regs->ARM_sp,
 			 THREAD_SIZE + (unsigned long)task_stack_page(tsk));
 		dump_backtrace(regs, tsk);
 		dump_instr(KERN_EMERG, regs);
-#ifdef CONFIG_LGE_CRASH_HANDLER
-		first_call_chain = 0;
-#endif
 	}
 
-	return 0;
+	return ret;
 }
 
-static arch_spinlock_t die_lock = __ARCH_SPIN_LOCK_UNLOCKED;
-static int die_owner = -1;
-static unsigned int die_nest_count;
-
-static unsigned long oops_begin(void)
-{
-	int cpu;
-	unsigned long flags;
-
-	oops_enter();
-
-	/* racy, but better than risking deadlock. */
-	raw_local_irq_save(flags);
-	cpu = smp_processor_id();
-	if (!arch_spin_trylock(&die_lock)) {
-		if (cpu == die_owner)
-			/* nested oops. should stop eventually */;
-		else
-			arch_spin_lock(&die_lock);
-	}
-	die_nest_count++;
-	die_owner = cpu;
-	console_verbose();
-	bust_spinlocks(1);
-	return flags;
-}
-
-static void oops_end(unsigned long flags, struct pt_regs *regs, int signr)
-{
-	if (regs && kexec_should_crash(current))
-		crash_kexec(regs);
-
-	bust_spinlocks(0);
-	die_owner = -1;
-	add_taint(TAINT_DIE);
-	die_nest_count--;
-	if (!die_nest_count)
-		/* Nest count reaches zero, release the lock. */
-		arch_spin_unlock(&die_lock);
-	raw_local_irq_restore(flags);
-	oops_exit();
-
-	if (in_interrupt())
-		panic("Fatal exception in interrupt");
-	if (panic_on_oops)
-		panic("Fatal exception");
-	if (signr)
-		do_exit(signr);
-}
+static DEFINE_RAW_SPINLOCK(die_lock);
 
 /*
  * This function is protected against re-entrancy.
  */
 void die(const char *str, struct pt_regs *regs, int err)
 {
+	struct thread_info *thread = current_thread_info();
+	int ret;
 	enum bug_trap_type bug_type = BUG_TRAP_TYPE_NONE;
-	unsigned long flags = oops_begin();
-	int sig = SIGSEGV;
 
+	oops_enter();
+
+	raw_spin_lock_irq(&die_lock);
+	console_verbose();
+	bust_spinlocks(1);
 	if (!user_mode(regs))
 		bug_type = report_bug(regs->ARM_pc, regs);
 	if (bug_type != BUG_TRAP_TYPE_NONE)
 		str = "Oops - BUG";
+	ret = __die(str, err, thread, regs);
 
-	if (__die(str, err, regs))
-		sig = 0;
+	if (regs && kexec_should_crash(thread->task))
+		crash_kexec(regs);
 
-	oops_end(flags, regs, sig);
+	bust_spinlocks(0);
+	add_taint(TAINT_DIE);
+	raw_spin_unlock_irq(&die_lock);
+	oops_exit();
+
+	if (in_interrupt())
+		panic("Fatal exception in interrupt");
+	if (panic_on_oops)
+		panic("Fatal exception");
+	if (ret != NOTIFY_STOP)
+		do_exit(SIGSEGV);
 }
 
 void arm_notify_die(const char *str, struct pt_regs *regs,
@@ -437,9 +370,17 @@ static int call_undef_hook(struct pt_regs *regs, unsigned int instr)
 
 asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 {
+	unsigned int correction = thumb_mode(regs) ? 2 : 4;
 	unsigned int instr;
 	siginfo_t info;
 	void __user *pc;
+
+	/*
+	 * According to the ARM ARM, PC is 2 or 4 bytes ahead,
+	 * depending whether we're in Thumb mode or not.
+	 * Correct this offset.
+	 */
+	regs->ARM_pc -= correction;
 
 	pc = (void __user *)instruction_pointer(regs);
 
@@ -455,25 +396,20 @@ asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 #endif
 			instr = *(u32 *) pc;
 	} else if (thumb_mode(regs)) {
-		if (get_user(instr, (u16 __user *)pc))
-			goto die_sig;
+		get_user(instr, (u16 __user *)pc);
 		if (is_wide_instruction(instr)) {
 			unsigned int instr2;
-			if (get_user(instr2, (u16 __user *)pc+1))
-				goto die_sig;
+			get_user(instr2, (u16 __user *)pc+1);
 			instr <<= 16;
 			instr |= instr2;
 		}
-	} else if (get_user(instr, (u32 __user *)pc)) {
-		goto die_sig;
+	} else {
+		get_user(instr, (u32 __user *)pc);
 	}
 
 	if (call_undef_hook(regs, instr) == 0)
 		return;
 
-	trace_undef_instr(regs, (void *)pc);
-
-die_sig:
 #ifdef CONFIG_DEBUG_USER
 	if (user_debug & UDBG_UNDEFINED) {
 		printk(KERN_INFO "%s (%d): undefined instruction: pc=%p\n",

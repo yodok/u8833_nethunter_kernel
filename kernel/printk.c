@@ -115,7 +115,15 @@ static DEFINE_RAW_SPINLOCK(logbuf_lock);
  */
 static unsigned log_start;	/* Index into log_buf: next char to be read by syslog() */
 static unsigned con_start;	/* Index into log_buf: next char to be sent to consoles */
+#ifdef CONFIG_SRECORDER_MSM
+#ifdef CONFIG_SRECORDER_POWERCOLLAPS
+static unsigned log_end __attribute__((__section__(".data")));	/* Index into log_buf: most-recently-written-char + 1 */
+#else
 static unsigned log_end;	/* Index into log_buf: most-recently-written-char + 1 */
+#endif /* CONFIG_SRECORDER_POWERCOLLAPS */
+#else
+static unsigned log_end;	/* Index into log_buf: most-recently-written-char + 1 */
+#endif /* CONFIG_SRECORDER_MSM */
 
 /*
  * If exclusive_console is non-NULL then only this console is to be printed to.
@@ -148,9 +156,30 @@ static int console_may_schedule;
 
 #ifdef CONFIG_PRINTK
 
+#ifdef CONFIG_SRECORDER_MSM
+#ifdef CONFIG_SRECORDER_POWERCOLLAPS
+static char __log_buf[__LOG_BUF_LEN] __attribute__((__section__(".data")));
+#else
 static char __log_buf[__LOG_BUF_LEN];
+#endif /* CONFIG_SRECORDER_POWERCOLLAPS */
+#else
+static char __log_buf[__LOG_BUF_LEN];
+#endif /* CONFIG_SRECORDER_MSM */
+#ifdef CONFIG_EXT4_HUAWEI_DEBUG
+const char *kmsg_buf = __log_buf;
+#endif
+#ifdef CONFIG_SRECORDER_MSM
+#ifdef CONFIG_SRECORDER_POWERCOLLAPS
+static char *log_buf __attribute__((__section__(".data"))) = __log_buf;
+static int log_buf_len __attribute__((__section__(".data"))) = __LOG_BUF_LEN;
+#else
 static char *log_buf = __log_buf;
 static int log_buf_len = __LOG_BUF_LEN;
+#endif /* CONFIG_SRECORDER_POWERCOLLAPS */
+#else
+static char *log_buf = __log_buf;
+static int log_buf_len = __LOG_BUF_LEN;
+#endif /* CONFIG_SRECORDER_MSM */
 static unsigned logged_chars; /* Number of chars produced since last read+clear operation */
 static int saved_console_loglevel = -1;
 
@@ -240,6 +269,21 @@ void __init setup_log_buf(int early)
 	pr_info("early log buf free: %d(%d%%)\n",
 		free, (free * 100) / __LOG_BUF_LEN);
 }
+
+#ifdef CONFIG_SRECORDER_MSM
+void get_log_buf_info(unsigned long *plog_buf, unsigned long*plog_end, unsigned long*plog_buf_len)
+{
+    if (unlikely(NULL == plog_buf || NULL == plog_end || NULL == plog_buf_len))
+    {
+        return;
+    }
+
+    *plog_buf = (unsigned long)&log_buf;
+    *plog_end = (unsigned long)&log_end;
+    *plog_buf_len = (unsigned long)&log_buf_len;
+}
+EXPORT_SYMBOL(get_log_buf_info);
+#endif /* CONFIG_SRECORDER_MSM */
 
 #ifdef CONFIG_BOOT_PRINTK_DELAY
 
@@ -686,19 +730,8 @@ static void call_console_drivers(unsigned start, unsigned end)
 	start_print = start;
 	while (cur_index != end) {
 		if (msg_level < 0 && ((end - cur_index) > 2)) {
-			/*
-			 * prepare buf_prefix, as a contiguous array,
-			 * to be processed by log_prefix function
-			 */
-			char buf_prefix[SYSLOG_PRI_MAX_LENGTH+1];
-			unsigned i;
-			for (i = 0; i < ((end - cur_index)) && (i < SYSLOG_PRI_MAX_LENGTH); i++) {
-				buf_prefix[i] = LOG_BUF(cur_index + i);
-			}
-			buf_prefix[i] = '\0'; /* force '\0' as last string character */
-
 			/* strip log prefix */
-			cur_index += log_prefix((const char *)&buf_prefix, &msg_level, NULL);
+			cur_index += log_prefix(&LOG_BUF(cur_index), &msg_level, NULL);
 			start_print = cur_index;
 		}
 		while (cur_index != end) {
@@ -875,9 +908,9 @@ static int console_trylock_for_printk(unsigned int cpu)
 		}
 	}
 	printk_cpu = UINT_MAX;
-	raw_spin_unlock(&logbuf_lock);
 	if (wake)
 		up(&console_sem);
+	raw_spin_unlock(&logbuf_lock);
 	return retval;
 }
 static const char recursion_bug_msg [] =
@@ -1002,7 +1035,11 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 
 				t = cpu_clock(printk_cpu);
 				nanosec_rem = do_div(t, 1000000000);
+#ifndef CONFIG_HUAWEI_KERNEL
 				tlen = sprintf(tbuf, "[%5lu.%06lu] ",
+#else
+				tlen = sprintf(tbuf, "[%d, %s] [%5lu.%06lu] ", current->pid, current->comm,
+#endif
 						(unsigned long) t,
 						nanosec_rem / 1000);
 
@@ -1707,10 +1744,17 @@ int unregister_console(struct console *console)
 }
 EXPORT_SYMBOL(unregister_console);
 
+#ifdef CONFIG_HUAWEI_KERNEL
+extern void save_address_to_crash_dump(const char *fmt, ...);
+#endif
+
 static int __init printk_late_init(void)
 {
 	struct console *con;
 
+#if defined(CONFIG_HUAWEI_KERNEL) && defined(CONFIG_PRINTK)
+    save_address_to_crash_dump(" __log_buf=%p-%d;", virt_to_phys(__log_buf), sizeof(__log_buf));
+#endif
 	for_each_console(con) {
 		if (!keep_bootcon && con->flags & CON_BOOT) {
 			printk(KERN_INFO "turn off boot console %s%d\n",
@@ -1725,7 +1769,7 @@ late_initcall(printk_late_init);
 
 #if defined CONFIG_PRINTK
 
-int printk_deferred(const char *fmt, ...)
+int printk_sched(const char *fmt, ...)
 {
 	unsigned long flags;
 	va_list args;

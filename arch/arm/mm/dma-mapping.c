@@ -284,7 +284,7 @@ void __init dma_contiguous_remap(void)
 		if (end > arm_lowmem_limit)
 			end = arm_lowmem_limit;
 		if (start >= end)
-			continue;
+			return;
 
 		map.pfn = __phys_to_pfn(start);
 		map.virtual = __phys_to_virt(start);
@@ -584,7 +584,7 @@ static void *__dma_alloc(struct device *dev, size_t size, dma_addr_t *handle,
 	 */
 	gfp &= ~(__GFP_COMP);
 
-	*handle = DMA_ERROR_CODE;
+	*handle = ~0;
 	size = PAGE_ALIGN(size);
 
 	if (arch_is_coherent() || nommu())
@@ -744,45 +744,42 @@ static void dma_cache_maint_page(struct page *page, unsigned long offset,
 	size_t size, enum dma_data_direction dir,
 	void (*op)(const void *, size_t, int))
 {
-	unsigned long pfn;
-	size_t left = size;
-
-	pfn = page_to_pfn(page) + offset / PAGE_SIZE;
-	offset %= PAGE_SIZE;
-
 	/*
 	 * A single sg entry may refer to multiple physically contiguous
 	 * pages.  But we still need to process highmem pages individually.
 	 * If highmem is not configured then the bulk of this loop gets
 	 * optimized out.
 	 */
+	size_t left = size;
 	do {
 		size_t len = left;
 		void *vaddr;
 
-		page = pfn_to_page(pfn);
-
 		if (PageHighMem(page)) {
-			if (len + offset > PAGE_SIZE)
+			if (len + offset > PAGE_SIZE) {
+				if (offset >= PAGE_SIZE) {
+					page += offset / PAGE_SIZE;
+					offset %= PAGE_SIZE;
+				}
 				len = PAGE_SIZE - offset;
-
-			if (cache_is_vipt_nonaliasing()) {
+			}
+			vaddr = kmap_high_get(page);
+			if (vaddr) {
+				vaddr += offset;
+				op(vaddr, len, dir);
+				kunmap_high(page);
+			} else if (cache_is_vipt()) {
+				/* unmapped pages might still be cached */
 				vaddr = kmap_atomic(page);
 				op(vaddr + offset, len, dir);
 				kunmap_atomic(vaddr);
-			} else {
-				vaddr = kmap_high_get(page);
-				if (vaddr) {
-					op(vaddr + offset, len, dir);
-					kunmap_high(page);
-				}
 			}
 		} else {
 			vaddr = page_address(page) + offset;
 			op(vaddr, len, dir);
 		}
 		offset = 0;
-		pfn++;
+		page++;
 		left -= len;
 	} while (left);
 }

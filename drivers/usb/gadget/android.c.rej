@@ -1,0 +1,21 @@
+--- drivers/usb/gadget/android.c
++++ drivers/usb/gadget/android.c
+@@ -2156,6 +2194,7 @@
+ 	&audio_source_function,
+ #endif
+ 	&uasp_function,
++	&hid_function,
+ 	NULL
+ };
+ 
+@@ -2481,8 +2521,10 @@
+ 				if (err)
+ 					pr_err("android_usb: Cannot enable %s",
+ 						name);
+ 			}
+ 		}
++		/* HID driver always enabled, it's the whole point of this kernel patch */
++		android_enable_function(dev, conf, "hid");
+ 	}
+ 
+ 	/* Free uneeded configurations if exists */

@@ -158,11 +158,8 @@ int __cpu_disable(void)
 	/*
 	 * Flush user cache and TLB mappings, and then remove this CPU
 	 * from the vm mask set of all processes.
-	 *
-	 * Caches are flushed to the Level of Unification Inner Shareable
-	 * to write-back dirty lines to unified caches shared by all CPUs.
 	 */
-	flush_cache_louis();
+	flush_cache_all();
 	local_flush_tlb_all();
 
 	read_lock(&tasklist_lock);
@@ -208,7 +205,7 @@ void __ref cpu_die(void)
 	idle_task_exit();
 
 	local_irq_disable();
-	flush_cache_louis();
+	mb();
 
 	/* Tell __cpu_die() that this CPU is now safe to dispose of */
 	RCU_NONIDLE(complete(&cpu_died));
@@ -217,8 +214,6 @@ void __ref cpu_die(void)
 	 * actual CPU shutdown procedure is at least platform (if not
 	 * CPU) specific.
 	 */
-	flush_cache_louis();
-
 	platform_cpu_die(cpu);
 
 	/*
@@ -254,29 +249,22 @@ static void __cpuinit smp_store_cpu_info(unsigned int cpuid)
 asmlinkage void __cpuinit secondary_start_kernel(void)
 {
 	struct mm_struct *mm = &init_mm;
-	unsigned int cpu;
-
-	/*
-	 * The identity mapping is uncached (strongly ordered), so
-	 * switch away from it before attempting any exclusive accesses.
-	 */
-	cpu_switch_mm(mm->pgd, mm);
-	enter_lazy_tlb(mm, current);
-	local_flush_tlb_all();
+	unsigned int cpu = smp_processor_id();
 
 	/*
 	 * All kernel threads share the same mm context; grab a
 	 * reference and switch to it.
 	 */
-	cpu = smp_processor_id();
 	atomic_inc(&mm->mm_count);
 	current->active_mm = mm;
 	cpumask_set_cpu(cpu, mm_cpumask(mm));
-
-	cpu_init();
+	cpu_switch_mm(mm->pgd, mm);
+	enter_lazy_tlb(mm, current);
+	local_flush_tlb_all();
 
 	pr_debug("CPU%u: Booted secondary processor\n", cpu);
 
+	cpu_init();
 	preempt_disable();
 	trace_hardirqs_off();
 
@@ -332,7 +320,6 @@ void __init smp_prepare_boot_cpu(void)
 {
 	unsigned int cpu = smp_processor_id();
 
-	set_my_cpu_offset(per_cpu_offset(smp_processor_id()));
 	per_cpu(cpu_data, cpu).idle = current;
 }
 
@@ -407,7 +394,7 @@ void show_ipi_list(struct seq_file *p, int prec)
 	for (i = 0; i < NR_IPI; i++) {
 		seq_printf(p, "%*s%u: ", prec - 1, "IPI", i);
 
-		for_each_online_cpu(cpu)
+		for_each_present_cpu(cpu)
 			seq_printf(p, "%10u ",
 				   __get_irq_stat(cpu, ipi_irqs[i]));
 
@@ -457,7 +444,7 @@ static void __cpuinit broadcast_timer_setup(struct clock_event_device *evt)
 	evt->features	= CLOCK_EVT_FEAT_ONESHOT |
 			  CLOCK_EVT_FEAT_PERIODIC |
 			  CLOCK_EVT_FEAT_DUMMY;
-	evt->rating	= 100;
+	evt->rating	= 400;
 	evt->mult	= 1;
 	evt->set_mode	= broadcast_timer_set_mode;
 

@@ -281,7 +281,7 @@ static struct block2mtd_dev *add_device(char *devname, int erase_size)
     #ifndef CONFIG_HUAWEI_APANIC
 	dev->mtd.writesize = 1;
     #else
-	dev->mtd.writebufsize = PAGE_SIZE;
+	dev->mtd.writesize = PAGE_SIZE/2 ;
     #endif	
 	dev->mtd.type = MTD_RAM;
 	dev->mtd.flags = MTD_CAP_RAM;
